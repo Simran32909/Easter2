@@ -1,6 +1,7 @@
 import config
 import tensorflow
-import tensorflow.keras.backend as K
+from tensorflow import keras
+from keras import backend as K
 from data_loader import data_loader
 import wandb
 from wandb.integration.keras import WandbCallback
@@ -9,7 +10,8 @@ import itertools
 from editdistance import eval as edit_distance
 import psutil
 import GPUtil
-from tensorflow.keras.callbacks import Callback
+from keras.callbacks import Callback
+import tensorflow as tf
 
 
 def ctc_loss(args):
