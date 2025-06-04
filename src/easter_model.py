@@ -1,148 +1,164 @@
+# src/easter_model.py
+
 import config
 import tensorflow
 import tensorflow.keras.backend as K
 from data_loader import data_loader
+import wandb
+from wandb.keras import WandbCallback
+import numpy as np
+import itertools
+from editdistance import eval as edit_distance
+import psutil
+import GPUtil
+
 
 def ctc_loss(args):
     y_pred, labels, input_length, label_length = args
     return K.ctc_batch_cost(
-        labels, 
-        y_pred, 
-        input_length, 
+        labels,
+        y_pred,
+        input_length,
         label_length
     )
 
+
 def ctc_custom(args):
     """
-    custom CTC loss
+    custom CTC loss with focal loss component
     """
     y_pred, labels, input_length, label_length = args
     ctc_loss = K.ctc_batch_cost(
-        labels, 
-        y_pred, 
-        input_length, 
+        labels,
+        y_pred,
+        input_length,
         label_length
     )
     p = tensorflow.exp(-ctc_loss)
     gamma = 0.5
-    alpha=0.25 
-    return alpha*(K.pow((1-p),gamma))*ctc_loss
+    alpha = 0.25
+    return alpha * (K.pow((1 - p), gamma)) * ctc_loss
+
 
 def batch_norm(inputs):
     return tensorflow.keras.layers.BatchNormalization(
-        momentum= config.BATCH_NORM_DECAY, 
-        epsilon = config.BATCH_NORM_EPSILON
+        momentum=config.BATCH_NORM_DECAY,
+        epsilon=config.BATCH_NORM_EPSILON
     )(inputs)
+
 
 def add_global_context(data, filters):
     """
-    1D Squeeze and Excitation Layer. 
+    1D Squeeze and Excitation Layer.
     """
     pool = tensorflow.keras.layers.GlobalAveragePooling1D()(data)
-    
+
     pool = tensorflow.keras.layers.Dense(
-        filters//8, 
+        filters // 8,
         activation='relu'
     )(pool)
-    
+
     pool = tensorflow.keras.layers.Dense(
-        filters, 
+        filters,
         activation='sigmoid'
-    )(pool) 
-    
+    )(pool)
+
+    pool = tensorflow.keras.layers.Reshape((1, filters))(pool)
     final = tensorflow.keras.layers.Multiply()([data, pool])
     return final
+
 
 def easter_unit(old, data, filters, kernel, stride, dropouts):
     """
     Easter unit with dense residual connections
     """
     old = tensorflow.keras.layers.Conv1D(
-        filters = filters, 
-        kernel_size = (1), 
-        strides = (1),
-        padding = "same"
+        filters=filters,
+        kernel_size=(1),
+        strides=(1),
+        padding="same"
     )(old)
     old = batch_norm(old)
-    
+
     this = tensorflow.keras.layers.Conv1D(
-        filters = filters, 
-        kernel_size = (1), 
-        strides = (1),
-        padding = "same"
+        filters=filters,
+        kernel_size=(1),
+        strides=(1),
+        padding="same"
     )(data)
     this = batch_norm(this)
-    
+
     old = tensorflow.keras.layers.Add()([old, this])
-    
-    #First Block
+
+    # First Block
     data = tensorflow.keras.layers.Conv1D(
-        filters = filters, 
-        kernel_size = (kernel), 
-        strides = (stride),
-        padding = "same"
+        filters=filters,
+        kernel_size=(kernel),
+        strides=(stride),
+        padding="same"
     )(data)
-    
+
     data = batch_norm(data)
     data = tensorflow.keras.layers.Activation('relu')(data)
     data = tensorflow.keras.layers.Dropout(dropouts)(data)
-    
-    #Second Block
+
+    # Second Block
     data = tensorflow.keras.layers.Conv1D(
-        filters = filters, 
-        kernel_size = (kernel), 
-        strides = (stride),
-        padding = "same"
+        filters=filters,
+        kernel_size=(kernel),
+        strides=(stride),
+        padding="same"
     )(data)
-    
+
     data = batch_norm(data)
     data = tensorflow.keras.layers.Activation('relu')(data)
     data = tensorflow.keras.layers.Dropout(dropouts)(data)
-    
-    #Third Block
+
+    # Third Block
     data = tensorflow.keras.layers.Conv1D(
-        filters = filters, 
-        kernel_size = (kernel), 
-        strides = (stride),
-        padding = "same"
+        filters=filters,
+        kernel_size=(kernel),
+        strides=(stride),
+        padding="same"
     )(data)
-    
+
     data = batch_norm(data)
-    
-    #squeeze and excitation
+
+    # squeeze and excitation
     data = add_global_context(data, filters)
-    
-    final = tensorflow.keras.layers.Add()([old,data])
-    
+
+    final = tensorflow.keras.layers.Add()([old, data])
+
     data = tensorflow.keras.layers.Activation('relu')(final)
     data = tensorflow.keras.layers.Dropout(dropouts)(data)
-       
+
     return data, old
+
 
 def Easter2():
     input_data = tensorflow.keras.layers.Input(
-        name='the_input', 
-        shape = config.INPUT_SHAPE
+        name='the_input',
+        shape=config.INPUT_SHAPE
     )
-    
+
     data = tensorflow.keras.layers.Conv1D(
-        filters = 128, 
-        kernel_size = (3), 
-        strides = (2), 
-        padding = "same"
+        filters=128,
+        kernel_size=(3),
+        strides=(2),
+        padding="same"
     )(input_data)
-    
+
     data = batch_norm(data)
     data = tensorflow.keras.layers.Activation('relu')(data)
     data = tensorflow.keras.layers.Dropout(0.2)(data)
 
     data = tensorflow.keras.layers.Conv1D(
-        filters = 128, 
-        kernel_size = (3), 
-        strides = (2), 
-        padding = "same"
+        filters=128,
+        kernel_size=(3),
+        strides=(2),
+        padding="same"
     )(data)
-    
+
     data = batch_norm(data)
     data = tensorflow.keras.layers.Activation('relu')(data)
     data = tensorflow.keras.layers.Dropout(0.2)(data)
@@ -151,54 +167,54 @@ def Easter2():
 
     # 3 * 3 Easter Blocks (with dense residuals)
     data, old = easter_unit(old, data, 256, 5, 1, 0.2)
-    data, old = easter_unit(old, data, 256, 7, 1, 0.2 )
-    data, old = easter_unit(old, data, 256, 9, 1, 0.3 )
+    data, old = easter_unit(old, data, 256, 7, 1, 0.2)
+    data, old = easter_unit(old, data, 256, 9, 1, 0.3)
 
     data = tensorflow.keras.layers.Conv1D(
-        filters = 512, 
-        kernel_size = (11), 
-        strides = (1), 
-        padding = "same", 
-        dilation_rate = 2
+        filters=512,
+        kernel_size=(11),
+        strides=(1),
+        padding="same",
+        dilation_rate=2
     )(data)
-    
+
     data = batch_norm(data)
     data = tensorflow.keras.layers.Activation('relu')(data)
     data = tensorflow.keras.layers.Dropout(0.4)(data)
 
     data = tensorflow.keras.layers.Conv1D(
-        filters = 512, 
-        kernel_size = (1), 
-        strides = (1), 
-        padding = "same"
+        filters=512,
+        kernel_size=(1),
+        strides=(1),
+        padding="same"
     )(data)
-    
+
     data = batch_norm(data)
     data = tensorflow.keras.layers.Activation('relu')(data)
     data = tensorflow.keras.layers.Dropout(0.4)(data)
 
     data = tensorflow.keras.layers.Conv1D(
-        filters = config.VOCAB_SIZE, 
-        kernel_size = (1), 
-        strides = (1), 
-        padding = "same"
+        filters=config.VOCAB_SIZE,
+        kernel_size=(1),
+        strides=(1),
+        padding="same"
     )(data)
-    
-    y_pred = tensorflow.keras.layers.Activation('softmax',name="Final")(data)
+
+    y_pred = tensorflow.keras.layers.Activation('softmax', name="Final")(data)
 
     # print model summary
-    tensorflow.keras.models.Model(inputs = input_data, outputs = y_pred).summary()
- 
+    tensorflow.keras.models.Model(inputs=input_data, outputs=y_pred).summary()
+
     # Defining other training parameters
-    Optimizer = tensorflow.keras.optimizers.Adam(lr = config.LEARNING_RATE)
-    
+    Optimizer = tensorflow.keras.optimizers.Adam(lr=config.LEARNING_RATE)
+
     labels = tensorflow.keras.layers.Input(
-        name = 'the_labels', 
-        shape=[config.OUTPUT_SHAPE], 
+        name='the_labels',
+        shape=[config.OUTPUT_SHAPE],
         dtype='float32'
     )
     input_length = tensorflow.keras.layers.Input(
-        name='input_length', 
+        name='input_length',
         shape=[1],
         dtype='int64'
     )
@@ -207,31 +223,167 @@ def Easter2():
         shape=[1],
         dtype='int64'
     )
-    
+
     output = tensorflow.keras.layers.Lambda(
-        ctc_custom, output_shape=(1,),name='ctc'
+        ctc_custom, output_shape=(1,), name='ctc'
     )([y_pred, labels, input_length, label_length])
 
     # compiling model
     model = tensorflow.keras.models.Model(
-        inputs = [input_data, labels, input_length, label_length], outputs= output
+        inputs=[input_data, labels, input_length, label_length], outputs=output
     )
-    
-    model.compile(loss={'ctc': lambda y_true, y_pred: y_pred}, optimizer = Optimizer)
+
+    model.compile(loss={'ctc': lambda y_true, y_pred: y_pred}, optimizer=Optimizer)
     return model
 
+
+def decoder(output, letters):
+    """Decode CTC output to text"""
+    ret = []
+    for j in range(output.shape[0]):
+        out_best = list(np.argmax(output[j, :], 1))
+        out_best = [k for k, g in itertools.groupby(out_best)]
+        outstr = ''
+        for c in out_best:
+            if c < len(letters):
+                outstr += letters[c]
+        ret.append(outstr)
+    return ret
+
+
+def calculate_cer(predictions, ground_truths):
+    """Calculate Character Error Rate"""
+    total_chars = 0
+    total_errors = 0
+    perfect_matches = 0
+
+    for pred, gt in zip(predictions, ground_truths):
+        pred = pred.strip()
+        gt = gt.strip()
+
+        if pred == gt:
+            perfect_matches += 1
+
+        total_chars += len(gt)
+        total_errors += edit_distance(pred, gt)
+
+    cer = (total_errors / total_chars) * 100 if total_chars > 0 else 0
+    accuracy = ((total_chars - total_errors) / total_chars) * 100 if total_chars > 0 else 0
+
+    return cer, accuracy, perfect_matches
+
+
+def get_system_metrics():
+    """Get system resource usage metrics"""
+    try:
+        # GPU metrics
+        gpus = GPUtil.getGPUs()
+        gpu_memory_used = gpus[0].memoryUsed if gpus else 0
+
+        # CPU and RAM metrics
+        cpu_percent = psutil.cpu_percent()
+        memory_percent = psutil.virtual_memory().percent
+
+        return {
+            'gpu_memory_used': gpu_memory_used,
+            'cpu_percent': cpu_percent,
+            'memory_percent': memory_percent
+        }
+    except:
+        return {
+            'gpu_memory_used': 0,
+            'cpu_percent': 0,
+            'memory_percent': 0
+        }
+
+
+class CERCallback(tensorflow.keras.callbacks.Callback):
+    """Custom callback to calculate CER during training"""
+
+    def __init__(self, validation_data, char_list):
+        self.validation_data = validation_data
+        self.char_list = char_list
+        self.prediction_model = None
+
+    def on_train_begin(self, logs=None):
+        # Create prediction model (without CTC loss layer)
+        self.prediction_model = tensorflow.keras.models.Model(
+            self.model.get_layer('the_input').input,
+            self.model.get_layer('Final').output
+        )
+
+    def on_epoch_end(self, epoch, logs=None):
+        # Get validation samples
+        self.validation_data.validationSet()
+        imgs, truths, _ = self.validation_data.getValidationImage()
+
+        if len(imgs) == 0:
+            return
+
+        predictions = []
+        ground_truths = []
+
+        # Make predictions
+        for img, truth in zip(imgs[:config.CER_EVAL_SAMPLES], truths[:config.CER_EVAL_SAMPLES]):
+            try:
+                output = self.prediction_model.predict(img, verbose=0)
+                pred = decoder(output, self.char_list)[0]
+                predictions.append(pred)
+                ground_truths.append(truth)
+            except Exception as e:
+                print(f"Error in prediction: {e}")
+                continue
+
+        if predictions:
+            # Calculate CER metrics
+            val_cer, val_accuracy, perfect_matches = calculate_cer(predictions, ground_truths)
+
+            # Get system metrics
+            system_metrics = get_system_metrics()
+
+            # Log to WandB
+            wandb.log({
+                'val_cer': val_cer,
+                'val_accuracy': val_accuracy,
+                'val_perfect_matches': perfect_matches,
+                'learning_rate': float(K.get_value(self.model.optimizer.lr)),
+                **system_metrics
+            })
+
+            print(
+                f"\nValidation CER: {val_cer:.2f}%, Accuracy: {val_accuracy:.2f}%, Perfect matches: {perfect_matches}")
+
+
 def train():
-    #Creating Easter2 object
+    # Initialize WandB
+    wandb.init(
+        project=config.WANDB_PROJECT,
+        name=config.WANDB_RUN_NAME,
+        config={
+            "learning_rate": config.LEARNING_RATE,
+            "batch_size": config.BATCH_SIZE,
+            "epochs": config.EPOCHS,
+            "input_width": config.INPUT_WIDTH,
+            "input_height": config.INPUT_HEIGHT,
+            "vocab_size": config.VOCAB_SIZE,
+            "output_shape": config.OUTPUT_SHAPE
+        }
+    )
+
+    # Creating Easter2 object
     model = Easter2()
-    
+
     # Loading checkpoint for transfer/resuming learning
     if config.LOAD:
-        print ("Intializing from checkpoint : ", config.LOAD_CHECKPOINT_PATH)
-        model.load_weights(config.LOAD_CHECKPOINT_PATH)
-        print ("Init weights loaded successfully....")
-        
+        print("Initializing from checkpoint:", config.LOAD_CHECKPOINT_PATH)
+        try:
+            model.load_weights(config.LOAD_CHECKPOINT_PATH)
+            print("Init weights loaded successfully....")
+        except Exception as e:
+            print(f"Could not load weights: {e}")
+
     # Loading Metadata, about training, validation and Test sets
-    print ("loading metdata...")
+    print("Loading metadata...")
     training_data = data_loader(config.DATA_PATH, config.BATCH_SIZE)
     validation_data = data_loader(config.DATA_PATH, config.BATCH_SIZE)
     test_data = data_loader(config.DATA_PATH, config.BATCH_SIZE)
@@ -240,39 +392,101 @@ def train():
     validation_data.validationSet()
     test_data.testSet()
 
-    print("Training Samples : ", len(training_data.samples))
-    print("Validation Samples : ", len(validation_data.samples))
-    print("Test Samples : ", len(test_data.samples))
-    print("CharList Size : ", len(training_data.charList))
-    
-    # callback arguments
+    print("Training Samples:", len(training_data.samples))
+    print("Validation Samples:", len(validation_data.samples))
+    print("Test Samples:", len(test_data.samples))
+    print("CharList Size:", len(training_data.charList))
+
+    # Update config with actual vocab size
+    config.VOCAB_SIZE = len(training_data.charList) + 1  # +1 for blank token
+
+    # Callback arguments
     CHECKPOINT = tensorflow.keras.callbacks.ModelCheckpoint(
-        filepath = config.CHECKPOINT_PATH,
-        monitor='loss', 
-        verbose=1, 
-        mode='min', 
-        period = 2
+        filepath=config.CHECKPOINT_PATH,
+        monitor='val_cer',
+        verbose=1,
+        save_best_only=True,
+        mode='min',
+        period=1
     )
-    
+
+    BEST_MODEL_CHECKPOINT = tensorflow.keras.callbacks.ModelCheckpoint(
+        filepath=config.BEST_MODEL_PATH,
+        monitor='val_cer',
+        verbose=1,
+        save_best_only=True,
+        mode='min'
+    )
+
     TENSOR_BOARD = tensorflow.keras.callbacks.TensorBoard(
-        log_dir=config.LOGS_DIR, 
-        histogram_freq=0, 
+        log_dir=config.LOGS_DIR,
+        histogram_freq=0,
         write_graph=True,
-        write_images=False, 
-        embeddings_freq=0
+        write_images=False
     )
-    
+
+    # Learning rate scheduler
+    LR_SCHEDULER = tensorflow.keras.callbacks.ReduceLROnPlateau(
+        monitor='val_cer',
+        factor=0.5,
+        patience=10,
+        min_lr=1e-6,
+        verbose=1
+    )
+
+    # Early stopping
+    EARLY_STOPPING = tensorflow.keras.callbacks.EarlyStopping(
+        monitor='val_cer',
+        patience=20,
+        restore_best_weights=True,
+        verbose=1
+    )
+
+    # Custom CER callback
+    CER_CALLBACK = CERCallback(validation_data, training_data.charList)
+
+    # WandB callback
+    WANDB_CALLBACK = WandbCallback(
+        monitor='val_cer',
+        mode='min',
+        save_model=False
+    )
+
     # steps per epoch calculation based on number of samples and batch size
-    STEPS_PER_EPOCH = len(training_data.samples)//config.BATCH_SIZE
-    VALIDATION_STEPS = len(validation_data.samples)//config.BATCH_SIZE
+    STEPS_PER_EPOCH = len(training_data.samples) // config.BATCH_SIZE
+    VALIDATION_STEPS = len(validation_data.samples) // config.BATCH_SIZE
+
+    print("Training Model...")
+    print(f"Steps per epoch: {STEPS_PER_EPOCH}")
+    print(f"Validation steps: {VALIDATION_STEPS}")
 
     # Start training with given parameters
-    print ("Training Model...")
-    model.fit_generator(
-        generator = training_data.getNext(), 
-        steps_per_epoch = STEPS_PER_EPOCH,
-        epochs = config.EPOCHS,
-        callbacks=[CHECKPOINT, TENSOR_BOARD],
-        validation_data = validation_data.getNext(), 
-        validation_steps = VALIDATION_STEPS
+    history = model.fit_generator(
+        generator=training_data.getNext('train'),
+        steps_per_epoch=STEPS_PER_EPOCH,
+        epochs=config.EPOCHS,
+        callbacks=[
+            CHECKPOINT,
+            BEST_MODEL_CHECKPOINT,
+            TENSOR_BOARD,
+            LR_SCHEDULER,
+            EARLY_STOPPING,
+            CER_CALLBACK,
+            WANDB_CALLBACK
+        ],
+        validation_data=validation_data.getNext('validation'),
+        validation_steps=VALIDATION_STEPS,
+        verbose=1
     )
+
+    # Save final model
+    model.save_weights('../weights/final_model.hdf5')
+
+    # Close WandB run
+    wandb.finish()
+
+    return history
+
+
+if __name__ == "__main__":
+    train()
