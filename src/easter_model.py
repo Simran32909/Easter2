@@ -354,21 +354,35 @@ class CERCallback(tensorflow.keras.callbacks.Callback):
                 f"\nValidation CER: {val_cer:.2f}%, Accuracy: {val_accuracy:.2f}%, Perfect matches: {perfect_matches}")
 
 
+# Add this to your easter_model.py train() function
+
 def train():
-    # Initialize WandB
-    wandb.init(
-        project=config.WANDB_PROJECT,
-        name=config.WANDB_RUN_NAME,
-        config={
-            "learning_rate": config.LEARNING_RATE,
-            "batch_size": config.BATCH_SIZE,
-            "epochs": config.EPOCHS,
-            "input_width": config.INPUT_WIDTH,
-            "input_height": config.INPUT_HEIGHT,
-            "vocab_size": config.VOCAB_SIZE,
-            "output_shape": config.OUTPUT_SHAPE
-        }
-    )
+    # Check if WandB should be disabled
+    if hasattr(config, 'DISABLE_WANDB') and config.DISABLE_WANDB:
+        print("WandB logging disabled by command line argument")
+        use_wandb = False
+    else:
+        use_wandb = True
+
+    # Initialize WandB only if not disabled
+    if use_wandb:
+        wandb.init(
+            project=config.WANDB_PROJECT,
+            name=config.WANDB_RUN_NAME,
+            config={
+                "learning_rate": config.LEARNING_RATE,
+                "batch_size": config.BATCH_SIZE,
+                "epochs": config.EPOCHS,
+                "input_width": config.INPUT_WIDTH,
+                "input_height": config.INPUT_HEIGHT,
+                "vocab_size": config.VOCAB_SIZE,
+                "output_shape": config.OUTPUT_SHAPE,
+                "train_samples": getattr(config, 'TRAIN_SAMPLES', None),
+                "val_samples": getattr(config, 'VAL_SAMPLES', None),
+                "train_val_split": getattr(config, 'TRAIN_VAL_SPLIT', 0.2),
+                "cer_eval_samples": getattr(config, 'CER_EVAL_SAMPLES', 100)
+            }
+        )
 
     # Creating Easter2 object
     model = Easter2()
@@ -391,6 +405,17 @@ def train():
     training_data.trainSet()
     validation_data.validationSet()
     test_data.testSet()
+
+    # Apply custom sample limits if specified
+    if hasattr(config, 'TRAIN_SAMPLES') and config.TRAIN_SAMPLES is not None:
+        original_train_samples = len(training_data.samples)
+        training_data.samples = training_data.samples[:config.TRAIN_SAMPLES]
+        print(f"Limited training samples: {original_train_samples} -> {len(training_data.samples)}")
+
+    if hasattr(config, 'VAL_SAMPLES') and config.VAL_SAMPLES is not None:
+        original_val_samples = len(validation_data.samples)
+        validation_data.samples = validation_data.samples[:config.VAL_SAMPLES]
+        print(f"Limited validation samples: {original_val_samples} -> {len(validation_data.samples)}")
 
     print("Training Samples:", len(training_data.samples))
     print("Validation Samples:", len(validation_data.samples))
@@ -445,12 +470,23 @@ def train():
     # Custom CER callback
     CER_CALLBACK = CERCallback(validation_data, training_data.charList)
 
-    # WandB callback
-    WANDB_CALLBACK = WandbCallback(
-        monitor='val_cer',
-        mode='min',
-        save_model=False
-    )
+    # WandB callback (only if WandB is enabled)
+    callbacks_list = [
+        CHECKPOINT,
+        BEST_MODEL_CHECKPOINT,
+        TENSOR_BOARD,
+        LR_SCHEDULER,
+        EARLY_STOPPING,
+        CER_CALLBACK
+    ]
+
+    if use_wandb:
+        WANDB_CALLBACK = WandbCallback(
+            monitor='val_cer',
+            mode='min',
+            save_model=False
+        )
+        callbacks_list.append(WANDB_CALLBACK)
 
     # steps per epoch calculation based on number of samples and batch size
     STEPS_PER_EPOCH = len(training_data.samples) // config.BATCH_SIZE
@@ -465,15 +501,7 @@ def train():
         generator=training_data.getNext('train'),
         steps_per_epoch=STEPS_PER_EPOCH,
         epochs=config.EPOCHS,
-        callbacks=[
-            CHECKPOINT,
-            BEST_MODEL_CHECKPOINT,
-            TENSOR_BOARD,
-            LR_SCHEDULER,
-            EARLY_STOPPING,
-            CER_CALLBACK,
-            WANDB_CALLBACK
-        ],
+        callbacks=callbacks_list,
         validation_data=validation_data.getNext('validation'),
         validation_steps=VALIDATION_STEPS,
         verbose=1
@@ -482,8 +510,9 @@ def train():
     # Save final model
     model.save_weights('../weights/final_model.hdf5')
 
-    # Close WandB run
-    wandb.finish()
+    # Close WandB run only if it was initialized
+    if use_wandb:
+        wandb.finish()
 
     return history
 

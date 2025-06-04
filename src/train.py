@@ -142,6 +142,16 @@ def main():
     parser.add_argument('--gpu', type=int, default=None,
                         help='GPU index to use (0-3 for your setup). If not specified, uses all available GPUs')
 
+    # Add custom train/val sample arguments
+    parser.add_argument('--train_samples', type=int, default=None,
+                        help='Number of training samples to use (default: use all available)')
+    parser.add_argument('--val_samples', type=int, default=None,
+                        help='Number of validation samples to use (default: use all available)')
+    parser.add_argument('--train_val_split', type=float, default=0.2,
+                        help='Validation split ratio (default: 0.2 = 20%% for validation)')
+    parser.add_argument('--cer_eval_samples', type=int, default=100,
+                        help='Number of samples to use for CER evaluation during training (default: 100)')
+
     args = parser.parse_args()
 
     # Update config with command line arguments
@@ -151,6 +161,17 @@ def main():
     config.LEARNING_RATE = args.learning_rate
     config.WANDB_PROJECT = args.wandb_project
     config.WANDB_RUN_NAME = args.wandb_run_name
+
+    # Set custom sample sizes in config
+    if args.train_samples is not None:
+        config.TRAIN_SAMPLES = args.train_samples
+    if args.val_samples is not None:
+        config.VAL_SAMPLES = args.val_samples
+    config.TRAIN_VAL_SPLIT = args.train_val_split
+    config.CER_EVAL_SAMPLES = args.cer_eval_samples
+
+    # Set WandB disable flag
+    config.DISABLE_WANDB = args.no_wandb
 
     if args.load_checkpoint:
         config.LOAD = True
@@ -164,10 +185,42 @@ def main():
     print(f"Epochs: {config.EPOCHS}")
     print(f"Learning Rate: {config.LEARNING_RATE}")
     print(f"Input Size: {config.INPUT_WIDTH}x{config.INPUT_HEIGHT}")
+    print(f"Train/Val Split: {args.train_val_split:.1%}")
+
+    # Display custom sample information
+    if args.train_samples is not None:
+        print(f"Custom Training Samples: {args.train_samples}")
+    else:
+        print("Training Samples: All available")
+
+    if args.val_samples is not None:
+        print(f"Custom Validation Samples: {args.val_samples}")
+    else:
+        print("Validation Samples: All available")
+
+    print(f"CER Evaluation Samples: {args.cer_eval_samples}")
+    print(f"WandB Logging: {'Disabled' if args.no_wandb else 'Enabled'}")
     print(f"Load Checkpoint: {config.LOAD}")
     if config.LOAD:
         print(f"Checkpoint Path: {config.LOAD_CHECKPOINT_PATH}")
     print("=" * 80)
+
+    # Validate sample arguments
+    if args.train_samples is not None and args.train_samples <= 0:
+        print("Error: train_samples must be a positive integer")
+        sys.exit(1)
+
+    if args.val_samples is not None and args.val_samples <= 0:
+        print("Error: val_samples must be a positive integer")
+        sys.exit(1)
+
+    if not (0.0 < args.train_val_split < 1.0):
+        print("Error: train_val_split must be between 0.0 and 1.0")
+        sys.exit(1)
+
+    if args.cer_eval_samples <= 0:
+        print("Error: cer_eval_samples must be a positive integer")
+        sys.exit(1)
 
     # Check GPU memory status
     check_gpu_memory(args.gpu)
@@ -185,15 +238,15 @@ def main():
         print("Dataset check failed. Please ensure your dataset is properly organized.")
         sys.exit(1)
 
-    # Login to WandB if not disabled
+    # Handle WandB login if not disabled
     if not args.no_wandb:
         try:
             wandb.login()
             print("WandB login successful")
         except Exception as e:
             print(f"WandB login failed: {e}")
-            print("Continuing without WandB logging...")
-            # You might want to modify the train function to handle this
+            print("Disabling WandB logging for this run...")
+            config.DISABLE_WANDB = True
 
     try:
         # Start training
@@ -207,18 +260,41 @@ def main():
         print("=" * 80)
         print(f"Total epochs completed: {len(history.history['loss'])}")
         print(f"Final training loss: {history.history['loss'][-1]:.4f}")
+
+        # Check for CER metrics in history
         if 'val_loss' in history.history:
             print(f"Final validation loss: {history.history['val_loss'][-1]:.4f}")
-        print(f"Model saved to: {config.BEST_MODEL_PATH}")
+
+        # Look for CER metrics that might be logged by the CERCallback
+        for key in history.history.keys():
+            if 'cer' in key.lower():
+                print(f"Final {key}: {history.history[key][-1]:.4f}")
+            elif 'accuracy' in key.lower():
+                print(f"Final {key}: {history.history[key][-1]:.4f}%")
+
+        print(f"Best model saved to: {config.BEST_MODEL_PATH}")
+        print(f"Final model saved to: ../weights/final_model.hdf5")
         print("=" * 80)
 
     except KeyboardInterrupt:
         print("\nTraining interrupted by user")
+        # Try to finish WandB run gracefully if it was started
+        try:
+            if not args.no_wandb and not config.DISABLE_WANDB:
+                wandb.finish()
+        except:
+            pass
         sys.exit(1)
     except Exception as e:
         print(f"\nTraining failed with error: {e}")
         import traceback
         traceback.print_exc()
+        # Try to finish WandB run gracefully if it was started
+        try:
+            if not args.no_wandb and not config.DISABLE_WANDB:
+                wandb.finish()
+        except:
+            pass
         sys.exit(1)
 
 
