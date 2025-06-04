@@ -131,7 +131,6 @@ class data_loader:
         return self.currIdx + self.batchSize <= len(self.samples)
 
     def preprocess(self, img, augment=True):
-        """Preprocess image for the model"""
         if img is None:
             img = np.zeros((config.INPUT_HEIGHT, config.INPUT_WIDTH), dtype=np.uint8)
 
@@ -148,7 +147,10 @@ class data_loader:
         # Invert image (black text on white background -> white text on black background)
         img = 1.0 - img
 
+        img = np.expand_dims(img, axis=-1)
+
         return img
+
 
     def apply_taco_augmentations(self, input_img):
         """Apply TACO augmentations"""
@@ -172,7 +174,8 @@ class data_loader:
                 gtTexts = np.ones([self.batchSize, config.OUTPUT_SHAPE], dtype=np.int32) * len(self.charList)
                 input_length = np.ones((self.batchSize,)) * config.OUTPUT_SHAPE
                 label_length = np.zeros((self.batchSize, 1))
-                imgs = np.zeros([self.batchSize, config.INPUT_WIDTH, config.INPUT_HEIGHT])
+                imgs = np.zeros([self.batchSize, config.INPUT_HEIGHT, config.INPUT_WIDTH, 1], dtype=np.float32)
+
 
                 j = 0
                 for i in batchRange:

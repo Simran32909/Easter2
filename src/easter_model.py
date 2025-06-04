@@ -1,5 +1,3 @@
-# src/easter_model.py
-
 import config
 import tensorflow
 import tensorflow.keras.backend as K
@@ -15,6 +13,17 @@ from tensorflow.keras.callbacks import Callback
 
 
 def ctc_loss(args):
+    """
+    Calculates the Connectionist Temporal Classification (CTC) loss.
+    Args:
+        args (tuple): A tuple containing:
+            y_pred (tf.Tensor): The output tensor from the model (softmax probabilities).
+            labels (tf.Tensor): The ground truth labels.
+            input_length (tf.Tensor): The length of the input sequences.
+            label_length (tf.Tensor): The length of the ground truth label sequences.
+    Returns:
+        tf.Tensor: The CTC loss.
+    """
     y_pred, labels, input_length, label_length = args
     return K.ctc_batch_cost(
         labels,
@@ -26,7 +35,15 @@ def ctc_loss(args):
 
 def ctc_custom(args):
     """
-    custom CTC loss with focal loss component
+    Custom CTC loss with a focal loss component.
+    Args:
+        args (tuple): A tuple containing:
+            y_pred (tf.Tensor): The output tensor from the model (softmax probabilities).
+            labels (tf.Tensor): The ground truth labels.
+            input_length (tf.Tensor): The length of the input sequences.
+            label_length (tf.Tensor): The length of the ground truth label sequences.
+    Returns:
+        tf.Tensor: The custom CTC loss including the focal loss component.
     """
     y_pred, labels, input_length, label_length = args
     ctc_loss = K.ctc_batch_cost(
@@ -42,6 +59,13 @@ def ctc_custom(args):
 
 
 def batch_norm(inputs):
+    """
+    Applies Batch Normalization to the inputs.
+    Args:
+        inputs (tf.Tensor): The input tensor to the batch normalization layer.
+    Returns:
+        tf.Tensor: The output tensor after batch normalization.
+    """
     return tensorflow.keras.layers.BatchNormalization(
         momentum=config.BATCH_NORM_DECAY,
         epsilon=config.BATCH_NORM_EPSILON
@@ -51,6 +75,11 @@ def batch_norm(inputs):
 def add_global_context(data, filters):
     """
     1D Squeeze and Excitation Layer.
+    Args:
+        data (tf.Tensor): The input tensor to the Squeeze and Excitation block.
+        filters (int): The number of filters (channels) in the input data.
+    Returns:
+        tf.Tensor: The output tensor after applying Squeeze and Excitation.
     """
     pool = tensorflow.keras.layers.GlobalAveragePooling1D()(data)
 
@@ -71,7 +100,18 @@ def add_global_context(data, filters):
 
 def easter_unit(old, data, filters, kernel, stride, dropouts):
     """
-    Easter unit with dense residual connections
+    Easter unit with dense residual connections.
+    Args:
+        old (tf.Tensor): The residual connection from a previous block.
+        data (tf.Tensor): The current input data for the unit.
+        filters (int): The number of filters for the convolutional layers.
+        kernel (int): The kernel size for the convolutional layers.
+        stride (int): The stride for the convolutional layers.
+        dropouts (float): The dropout rate.
+    Returns:
+        tuple: A tuple containing:
+            - tf.Tensor: The output tensor of the Easter unit.
+            - tf.Tensor: The updated 'old' tensor for the next residual connection.
     """
     old = tensorflow.keras.layers.Conv1D(
         filters=filters,
@@ -137,6 +177,11 @@ def easter_unit(old, data, filters, kernel, stride, dropouts):
 
 
 def Easter2():
+    """
+    Constructs the Easter2 Keras model.
+    Returns:
+        tf.keras.Model: The compiled Keras model for training with CTC loss.
+    """
     input_data = tensorflow.keras.layers.Input(
         name='the_input',
         shape=config.INPUT_SHAPE
@@ -234,27 +279,46 @@ def Easter2():
         inputs=[input_data, labels, input_length, label_length], outputs=output
     )
     def ctc_lambda_func(y_true, y_pred):
-        return y_pred 
+        # This lambda function is a placeholder for Keras's loss compilation.
+        # The actual CTC loss calculation happens within the 'ctc_custom' Lambda layer.
+        return y_pred
     model.compile(loss={'ctc': ctc_lambda_func}, optimizer=Optimizer)
     return model
 
 
 def decoder(output, letters):
-    """Decode CTC output to text"""
+    """
+    Decodes CTC output probabilities into text sequences.
+    Args:
+        output (np.ndarray): The output probabilities from the CTC layer.
+        letters (list): A list of characters representing the vocabulary.
+    Returns:
+        list: A list of decoded text strings.
+    """
     ret = []
     for j in range(output.shape[0]):
         out_best = list(np.argmax(output[j, :], 1))
-        out_best = [k for k, g in itertools.groupby(out_best)]
+        out_best = [k for k, g in itertools.groupby(out_best)] # Remove consecutive duplicates
         outstr = ''
         for c in out_best:
-            if c < len(letters):
+            if c < len(letters): # Ensure character index is within bounds
                 outstr += letters[c]
         ret.append(outstr)
     return ret
 
 
 def calculate_cer(predictions, ground_truths):
-    """Calculate Character Error Rate"""
+    """
+    Calculates Character Error Rate (CER), accuracy, and perfect matches.
+    Args:
+        predictions (list): A list of predicted text strings.
+        ground_truths (list): A list of ground truth text strings.
+    Returns:
+        tuple: A tuple containing:
+            - float: The Character Error Rate (CER) as a percentage.
+            - float: The accuracy as a percentage.
+            - int: The number of perfect matches.
+    """
     total_chars = 0
     total_errors = 0
     perfect_matches = 0
@@ -276,7 +340,12 @@ def calculate_cer(predictions, ground_truths):
 
 
 def get_system_metrics():
-    """Get system resource usage metrics"""
+    """
+    Get system resource usage metrics (GPU, CPU, RAM).
+    Returns:
+        dict: A dictionary containing 'gpu_memory_used', 'cpu_percent', and 'memory_percent'.
+              Returns zeros if metrics cannot be retrieved.
+    """
     try:
         # GPU metrics
         gpus = GPUtil.getGPUs()
@@ -291,7 +360,8 @@ def get_system_metrics():
             'cpu_percent': cpu_percent,
             'memory_percent': memory_percent
         }
-    except:
+    except Exception as e:
+        print(f"Error getting system metrics: {e}")
         return {
             'gpu_memory_used': 0,
             'cpu_percent': 0,
@@ -306,43 +376,74 @@ class CERCallback(Callback):
         super().__init__()
         self.validation_data = validation_data
         self.char_list = char_list
-        self.prediction_model = None  # Will be initialized later
+        self.prediction_model = None  # Will be initialized later by Keras calling set_model
 
     def set_model(self, model):
-        """Called by Keras to set the model. Here we initialize the prediction model."""
-        self.model = model
+        """
+        Called by Keras to set the model.
+        Here we initialize the prediction model using the 'model' provided by Keras.
+        We do NOT reassign self.model, as Keras manages this attribute.
+        """
+        # Keras automatically sets self.model = model before calling this method.
+        # So, we can directly use the 'model' argument to create our prediction_model.
         try:
-            # Assumes the output layer is named 'Final'
+            # Assumes the output layer is named 'Final'.
+            # If 'Final' layer is not found, a ValueError will be raised.
             self.prediction_model = tf.keras.models.Model(
-                inputs=self.model.input,
-                outputs=self.model.get_layer('Final').output
+                inputs=model.input, # Use the 'model' argument passed by Keras
+                outputs=model.get_layer('Final').output
             )
+            print("Prediction model initialized successfully in CERCallback.")
+        except ValueError as ve:
+            # Catch specific error if the layer 'Final' is not found
+            print(f"Error creating prediction model: Layer 'Final' not found or invalid: {ve}")
+            self.prediction_model = None # Ensure it's explicitly None if creation fails
         except Exception as e:
-            print(f"Error creating prediction model: {e}")
+            # Catch any other unexpected errors during model creation
+            print(f"An unexpected error occurred while creating prediction model: {e}")
+            self.prediction_model = None
 
     def on_epoch_end(self, epoch, logs=None):
+        """
+        Actions to perform at the end of each training epoch.
+        Calculates CER on validation data and logs metrics.
+        """
+        # Ensure prediction_model is initialized before proceeding
+        if self.prediction_model is None:
+            print("Warning: prediction_model was not initialized. Skipping CER calculation for this epoch.")
+            return
+
         # Get validation samples
         self.validation_data.validationSet()
         imgs, truths, _ = self.validation_data.getValidationImage()
 
-        if len(imgs) == 0:
+        if not imgs: # Check if imgs list is empty
+            print("No validation images found. Skipping CER calculation for this epoch.")
             return
 
         predictions = []
         ground_truths = []
 
         # Make predictions
+        # Limit the number of samples to evaluate based on config.CER_EVAL_SAMPLES
         for img, truth in zip(imgs[:config.CER_EVAL_SAMPLES], truths[:config.CER_EVAL_SAMPLES]):
             try:
-                output = self.prediction_model.predict(img, verbose=0)
-                pred = decoder(output, self.char_list)[0]
+                # Ensure img is correctly shaped for prediction (e.g., add batch dimension if missing)
+                # Assuming img is a single image, reshape it to (1, height, width, channels)
+                if len(img.shape) == 3: # Assuming (height, width, channels)
+                    img_batch = tf.expand_dims(img, axis=0)
+                else: # Assuming it's already (batch, height, width, channels) or similar
+                    img_batch = img
+
+                output = self.prediction_model.predict(img_batch, verbose=0)
+                pred = decoder(output, self.char_list)[0] # Assuming decoder returns a list
                 predictions.append(pred)
                 ground_truths.append(truth)
             except Exception as e:
-                print(f"Error in prediction: {e}")
-                continue
+                print(f"Error in prediction for a sample: {e}")
+                continue # Continue to the next sample even if one fails
 
-        if predictions:
+        if predictions: # Only proceed if there were successful predictions
             # Calculate CER metrics
             val_cer, val_accuracy, perfect_matches = calculate_cer(predictions, ground_truths)
 
@@ -350,23 +451,31 @@ class CERCallback(Callback):
             system_metrics = get_system_metrics()
 
             # Log to WandB
+            # Ensure self.model.optimizer and self.model.optimizer.lr exist before accessing
+            learning_rate = 0.0 # Default if not available
+            if hasattr(self.model, 'optimizer') and hasattr(self.model.optimizer, 'lr'):
+                learning_rate = float(K.get_value(self.model.optimizer.lr))
+
             wandb.log({
                 'val_cer': val_cer,
                 'val_accuracy': val_accuracy,
                 'val_perfect_matches': perfect_matches,
-                'learning_rate': float(K.get_value(self.model.optimizer.lr)),
+                'learning_rate': learning_rate,
                 **system_metrics
             })
 
             print(
                 f"\nValidation CER: {val_cer:.2f}%, Accuracy: {val_accuracy:.2f}%, Perfect matches: {perfect_matches}"
             )
+        else:
+            print("No successful predictions were made for CER calculation this epoch.")
 
-
-
-# Add this to your easter_model.py train() function
 
 def train():
+    """
+    Main training function for the Easter2 model.
+    Initializes WandB, loads data, sets up callbacks, and starts model training.
+    """
     # Check if WandB should be disabled
     if hasattr(config, 'DISABLE_WANDB') and config.DISABLE_WANDB:
         print("WandB logging disabled by command line argument")
