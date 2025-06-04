@@ -5,12 +5,13 @@ import tensorflow
 import tensorflow.keras.backend as K
 from data_loader import data_loader
 import wandb
-from wandb.keras import WandbCallback
+from wandb.integration.keras import WandbCallback
 import numpy as np
 import itertools
 from editdistance import eval as edit_distance
 import psutil
 import GPUtil
+from tensorflow.keras.callbacks import Callback
 
 
 def ctc_loss(args):
@@ -206,11 +207,11 @@ def Easter2():
     tensorflow.keras.models.Model(inputs=input_data, outputs=y_pred).summary()
 
     # Defining other training parameters
-    Optimizer = tensorflow.keras.optimizers.Adam(lr=config.LEARNING_RATE)
+    Optimizer = tensorflow.keras.optimizers.Adam(learning_rate=config.LEARNING_RATE)
 
     labels = tensorflow.keras.layers.Input(
         name='the_labels',
-        shape=[config.OUTPUT_SHAPE],
+        shape=(config.OUTPUT_SHAPE,),
         dtype='float32'
     )
     input_length = tensorflow.keras.layers.Input(
@@ -232,8 +233,9 @@ def Easter2():
     model = tensorflow.keras.models.Model(
         inputs=[input_data, labels, input_length, label_length], outputs=output
     )
-
-    model.compile(loss={'ctc': lambda y_true, y_pred: y_pred}, optimizer=Optimizer)
+    def ctc_lambda_func(y_true, y_pred):
+        return y_pred 
+    model.compile(loss={'ctc': ctc_lambda_func}, optimizer=Optimizer)
     return model
 
 
@@ -297,20 +299,26 @@ def get_system_metrics():
         }
 
 
-class CERCallback(tensorflow.keras.callbacks.Callback):
+class CERCallback(Callback):
     """Custom callback to calculate CER during training"""
 
     def __init__(self, validation_data, char_list):
+        super().__init__()
         self.validation_data = validation_data
         self.char_list = char_list
-        self.prediction_model = None
+        self.prediction_model = None  # Will be initialized later
 
-    def on_train_begin(self, logs=None):
-        # Create prediction model (without CTC loss layer)
-        self.prediction_model = tensorflow.keras.models.Model(
-            self.model.get_layer('the_input').input,
-            self.model.get_layer('Final').output
-        )
+    def set_model(self, model):
+        """Called by Keras to set the model. Here we initialize the prediction model."""
+        self.model = model
+        try:
+            # Assumes the output layer is named 'Final'
+            self.prediction_model = tf.keras.models.Model(
+                inputs=self.model.input,
+                outputs=self.model.get_layer('Final').output
+            )
+        except Exception as e:
+            print(f"Error creating prediction model: {e}")
 
     def on_epoch_end(self, epoch, logs=None):
         # Get validation samples
@@ -351,7 +359,9 @@ class CERCallback(tensorflow.keras.callbacks.Callback):
             })
 
             print(
-                f"\nValidation CER: {val_cer:.2f}%, Accuracy: {val_accuracy:.2f}%, Perfect matches: {perfect_matches}")
+                f"\nValidation CER: {val_cer:.2f}%, Accuracy: {val_accuracy:.2f}%, Perfect matches: {perfect_matches}"
+            )
+
 
 
 # Add this to your easter_model.py train() function
@@ -432,7 +442,7 @@ def train():
         verbose=1,
         save_best_only=True,
         mode='min',
-        period=1
+        save_freq='epoch'
     )
 
     BEST_MODEL_CHECKPOINT = tensorflow.keras.callbacks.ModelCheckpoint(
@@ -497,8 +507,8 @@ def train():
     print(f"Validation steps: {VALIDATION_STEPS}")
 
     # Start training with given parameters
-    history = model.fit_generator(
-        generator=training_data.getNext('train'),
+    history = model.fit(
+        training_data.getNext('train'),
         steps_per_epoch=STEPS_PER_EPOCH,
         epochs=config.EPOCHS,
         callbacks=callbacks_list,
@@ -508,7 +518,7 @@ def train():
     )
 
     # Save final model
-    model.save_weights('../weights/final_model.hdf5')
+    model.save_weights(config.FINAL_MODEL_PATH)
 
     # Close WandB run only if it was initialized
     if use_wandb:

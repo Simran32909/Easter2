@@ -170,7 +170,7 @@ class data_loader:
                 batchRange = range(self.currIdx, self.currIdx + self.batchSize)
 
                 gtTexts = np.ones([self.batchSize, config.OUTPUT_SHAPE], dtype=np.int32) * len(self.charList)
-                input_length = np.ones((self.batchSize, 1)) * config.OUTPUT_SHAPE
+                input_length = np.ones((self.batchSize,)) * config.OUTPUT_SHAPE
                 label_length = np.zeros((self.batchSize, 1))
                 imgs = np.zeros([self.batchSize, config.INPUT_WIDTH, config.INPUT_HEIGHT])
 
