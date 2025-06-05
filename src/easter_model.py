@@ -546,13 +546,8 @@ def train():
             logits = model(inputs, training=True)  # shape: (batch_size, time_steps, vocab_size)
 
             input_length = tf.cast(input_length, tf.int32)
-            label_length = tf.reshape(label_length, [-1])
+            label_length = tf.cast(tf.reshape(label_length, [-1]), tf.int32)
             logits = tf.cast(logits, tf.float32)
-
-            tf.print("logits shape:", tf.shape(logits))
-            tf.print("labels shape:", tf.shape(labels))
-            tf.print("input_length:", input_length)
-            tf.print("label_length:", label_length)
 
             sparse_labels = tf.keras.backend.ctc_label_dense_to_sparse(labels, label_length)
 
