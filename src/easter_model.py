@@ -686,6 +686,11 @@ def train():
         )
         callbacks_list.append(WANDB_CALLBACK)
 
+    # Manually set the model for each callback
+    for callback in callbacks_list:
+        if hasattr(callback, 'set_model'):
+            callback.set_model(model)
+
     # Training loop with tqdm progress bars
     print("Starting custom training loop...")
 
