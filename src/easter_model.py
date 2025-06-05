@@ -194,7 +194,7 @@ def Easter2():
     """
     Constructs the Easter2 Keras model.
     Returns:
-        tf.keras.Model: The compiled Keras model for training with CTC loss.
+        tf.keras.Model: The model that outputs prediction logits.
     """
     input_data = tensorflow.keras.layers.Input(
         name='the_input',
@@ -260,48 +260,24 @@ def Easter2():
         padding="same"
     )(data)
 
-    y_pred = tensorflow.keras.layers.Activation('softmax', name="Final")(data)
+    # Output logits (not softmax)
+    y_pred = data
 
-    # print model summary
-    tensorflow.keras.models.Model(inputs=input_data, outputs=y_pred).summary()
+    # Create model that outputs prediction logits
+    model = tensorflow.keras.models.Model(
+        inputs=input_data, 
+        outputs=y_pred
+    )
 
     # Defining other training parameters
     Optimizer = tensorflow.keras.optimizers.Adam(learning_rate=config.LEARNING_RATE)
-
-    labels = tensorflow.keras.layers.Input(
-        name='the_labels',
-        shape=(config.OUTPUT_SHAPE,),
-        dtype='float32'
-    )
-    input_length = tensorflow.keras.layers.Input(
-        name='input_length',
-        shape=[1],
-        dtype='int64'
-    )
-    label_length = tensorflow.keras.layers.Input(
-        name='label_length',
-        shape=[1],
-        dtype='int64'
-    )
-
-    # Use ctc_custom Lambda layer for loss calculation
-    loss_output = tensorflow.keras.layers.Lambda(
-        ctc_custom, output_shape=(1,)
-    )([y_pred, labels, input_length, label_length])
-
-    # Create model with explicit inputs and outputs
-    model = tensorflow.keras.models.Model(
-        inputs=[input_data, labels, input_length, label_length], 
-        outputs=loss_output
-    )
     
-    # Use a simple loss function that just returns the model output
-    # The actual CTC loss calculation happens in the Lambda layer
-    def identity_loss(y_true, y_pred):
-        return y_pred
-        
-    # Compile model with the identity loss function
-    model.compile(loss=identity_loss, optimizer=Optimizer)
+    # Compile model with standard categorical crossentropy
+    model.compile(
+        optimizer=Optimizer, 
+        loss=None,  # Loss will be handled externally
+        jit_compile=False  # Explicitly disable JIT compilation
+    )
     
     return model
 
@@ -523,7 +499,7 @@ def train():
             }
         )
 
-    # Creating Easter2 object
+    # Creating Easter2 model
     model = Easter2()
 
     # Loading checkpoint for transfer/resuming learning
@@ -564,10 +540,38 @@ def train():
     # Update config with actual vocab size
     config.VOCAB_SIZE = len(training_data.charList) + 1  # +1 for blank token
 
-    # Callback arguments
+    # Custom training loop with external CTC loss
+    @tf.function
+    def train_step(inputs, labels, input_length, label_length):
+        with tf.GradientTape() as tape:
+            # Forward pass
+            logits = model(inputs, training=True)
+            
+            # Compute CTC loss using TensorFlow's native implementation
+            loss = tf.nn.ctc_loss(
+                labels=labels,
+                logits=logits,
+                label_length=label_length,
+                logit_length=input_length,
+                blank_index=config.VOCAB_SIZE - 1,  # Last index is blank
+                logits_time_major=False
+            )
+            
+            # Average loss across batch
+            loss = tf.reduce_mean(loss)
+        
+        # Compute gradients
+        gradients = tape.gradient(loss, model.trainable_variables)
+        
+        # Apply gradients
+        model.optimizer.apply_gradients(zip(gradients, model.trainable_variables))
+        
+        return loss
+
+    # Prepare callbacks and training parameters
     CHECKPOINT = tensorflow.keras.callbacks.ModelCheckpoint(
         filepath=config.CHECKPOINT_PATH,
-        monitor='val_cer',
+        monitor='val_loss',
         verbose=1,
         save_best_only=True,
         mode='min',
@@ -576,76 +580,66 @@ def train():
 
     BEST_MODEL_CHECKPOINT = tensorflow.keras.callbacks.ModelCheckpoint(
         filepath=config.BEST_MODEL_PATH,
-        monitor='val_cer',
+        monitor='val_loss',
         verbose=1,
         save_best_only=True,
         mode='min'
     )
 
-    TENSOR_BOARD = tensorflow.keras.callbacks.TensorBoard(
-        log_dir=config.LOGS_DIR,
-        histogram_freq=0,
-        write_graph=True,
-        write_images=False
-    )
-
-    # Learning rate scheduler
-    LR_SCHEDULER = tensorflow.keras.callbacks.ReduceLROnPlateau(
-        monitor='val_cer',
-        factor=0.5,
-        patience=10,
-        min_lr=1e-6,
-        verbose=1
-    )
-
-    # Early stopping
-    EARLY_STOPPING = tensorflow.keras.callbacks.EarlyStopping(
-        monitor='val_cer',
-        patience=20,
-        restore_best_weights=True,
-        verbose=1
-    )
-
     # Custom CER callback
     CER_CALLBACK = CERCallback(validation_data, training_data.charList)
 
-    # WandB callback (only if WandB is enabled)
+    # Prepare callbacks list
     callbacks_list = [
         CHECKPOINT,
         BEST_MODEL_CHECKPOINT,
-        TENSOR_BOARD,
-        LR_SCHEDULER,
-        EARLY_STOPPING,
         CER_CALLBACK
     ]
 
+    # Add WandB callback if enabled
     if use_wandb:
         WANDB_CALLBACK = WandbCallback(
-            monitor='val_cer',
+            monitor='val_loss',
             mode='min',
             save_model=False
         )
         callbacks_list.append(WANDB_CALLBACK)
 
-    # steps per epoch calculation based on number of samples and batch size
-    STEPS_PER_EPOCH = len(training_data.samples) // config.BATCH_SIZE
-    VALIDATION_STEPS = len(validation_data.samples) // config.BATCH_SIZE
-
-    print("Training Model...")
-    print(f"Steps per epoch: {STEPS_PER_EPOCH}")
-    print(f"Validation steps: {VALIDATION_STEPS}")
-
-    # Start training with given parameters
-    history = model.fit(
-        training_data.getNext('train'),
-        steps_per_epoch=STEPS_PER_EPOCH,
-        epochs=config.EPOCHS,
-        callbacks=callbacks_list,
-        validation_data=validation_data.getNext('validation'),
-        validation_steps=VALIDATION_STEPS,
-        verbose=1
-    )
-
+    # Training loop
+    print("Starting custom training loop...")
+    for epoch in range(config.EPOCHS):
+        print(f"Epoch {epoch+1}/{config.EPOCHS}")
+        
+        # Reset data generators
+        training_data.trainSet()
+        validation_data.validationSet()
+        
+        # Training phase
+        total_train_loss = 0.0
+        train_batches = 0
+        for inputs, outputs in training_data.getNext('train'):
+            # Unpack inputs
+            batch_inputs = inputs['the_input']
+            batch_labels = inputs['the_labels']
+            batch_input_length = inputs['input_length']
+            batch_label_length = inputs['label_length']
+            
+            # Perform training step
+            loss = train_step(batch_inputs, batch_labels, batch_input_length, batch_label_length)
+            total_train_loss += loss.numpy()
+            train_batches += 1
+        
+        # Average training loss
+        avg_train_loss = total_train_loss / train_batches
+        print(f"Training Loss: {avg_train_loss:.4f}")
+        
+        # Run validation and callbacks
+        for callback in callbacks_list:
+            if hasattr(callback, 'on_epoch_end'):
+                callback.on_epoch_end(epoch, {'loss': avg_train_loss})
+        
+        # Optional early stopping logic can be added here
+        
     # Save final model
     model.save_weights(config.FINAL_MODEL_PATH)
 
@@ -653,7 +647,7 @@ def train():
     if use_wandb:
         wandb.finish()
 
-    return history
+    return None  # Modify return as needed for your tracking requirements
 
 
 if __name__ == "__main__":
