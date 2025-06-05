@@ -36,7 +36,7 @@ def ctc_loss(args):
 
 def ctc_custom(args):
     """
-    Custom CTC loss with a focal loss component.
+    Custom CTC loss with a focal loss-inspired modification.
     Args:
         args (tuple): A tuple containing:
             y_pred (tf.Tensor): The output tensor from the model (softmax probabilities).
@@ -44,19 +44,32 @@ def ctc_custom(args):
             input_length (tf.Tensor): The length of the input sequences.
             label_length (tf.Tensor): The length of the ground truth label sequences.
     Returns:
-        tf.Tensor: The custom CTC loss including the focal loss component.
+        tf.Tensor: The modified CTC loss.
     """
     y_pred, labels, input_length, label_length = args
-    ctc_loss = tf.keras.backend.ctc_batch_cost(
+    
+    # Calculate base CTC loss
+    ctc_loss_val = tf.keras.backend.ctc_batch_cost(
         labels,
         y_pred,
         input_length,
         label_length
     )
-    p = tf.exp(-ctc_loss)
+    
+    # Simple focal loss-like modification
+    # Reduce the impact of easy samples by scaling the loss
     gamma = 0.5
     alpha = 0.25
-    return alpha * (tf.math.pow((1 - p), gamma)) * ctc_loss
+    
+    # Compute a simple "difficulty" measure
+    # Lower loss values indicate easier samples
+    difficulty = tf.exp(-ctc_loss_val)
+    
+    # Apply focal loss-like scaling
+    # Samples that are easier (higher difficulty) get less weight
+    scaled_loss = alpha * tf.pow((1.0 - difficulty), gamma) * ctc_loss_val
+    
+    return scaled_loss
 
 
 def batch_norm(inputs):
@@ -271,7 +284,7 @@ def Easter2():
         dtype='int64'
     )
 
-    # Calculate CTC loss as part of the model
+    # Use ctc_custom Lambda layer for loss calculation
     loss_output = tensorflow.keras.layers.Lambda(
         ctc_custom, output_shape=(1,)
     )([y_pred, labels, input_length, label_length])
