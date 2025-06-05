@@ -11,6 +11,9 @@ import config
 
 def setup_gpu(gpu_index=None):
     """Setup GPU configuration"""
+    # Disable XLA compilation
+    tf.config.optimizer.set_jit(False)  # Explicitly disable XLA JIT
+    
     gpus = tf.config.experimental.list_physical_devices('GPU')
 
     if not gpus:
@@ -122,6 +125,26 @@ def check_dataset():
 
 
 def main():
+    # Additional XLA disabling configurations
+    # Disable XLA compilation for TensorFlow operations
+    tf.config.optimizer.set_jit(False)
+    
+    # Disable XLA experimental flags
+    os.environ['TF_XLA_FLAGS'] = '--tf_xla_auto_jit=0'
+    
+    # Disable other potential XLA-related optimizations
+    tf.config.optimizer.set_experimental_options({
+        'layout_optimizer': False,
+        'constant_folding': False,
+        'shape_optimization': False,
+        'remapping': False,
+        'arithmetic_optimization': False,
+        'dependency_optimization': False,
+        'loop_optimization': False,
+        'function_optimization': False,
+        'debug_stripper': False
+    })
+    
     parser = argparse.ArgumentParser(description='Train Easter2 OCR on Sharada Manuscript Dataset')
     parser.add_argument('--data_path', type=str, default=config.DATA_PATH,
                         help='Path to dataset directory')
