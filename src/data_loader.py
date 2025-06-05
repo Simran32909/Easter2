@@ -226,7 +226,7 @@ class data_loader:
                     'input_length': input_length,
                     'label_length': label_length,
                 }
-                outputs = {'ctc': np.zeros([self.batchSize])}
+                outputs = {'loss_output': np.zeros([self.batchSize])}
                 yield (inputs, outputs)
             else:
                 self.currIdx = 0
