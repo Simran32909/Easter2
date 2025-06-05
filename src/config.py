@@ -13,7 +13,7 @@ LONG_LINES = False
 LONG_LINES_FRACTION = 0.3
 
 # Model training parameters
-BATCH_SIZE = 1
+BATCH_SIZE = 512
 EPOCHS = 150
 VOCAB_SIZE = 163
 DROPOUT = True

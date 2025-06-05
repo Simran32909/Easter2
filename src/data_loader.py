@@ -13,6 +13,7 @@ from sklearn.model_selection import train_test_split
 import config
 import matplotlib.pyplot as plt
 from tacobox import Taco
+import tensorflow as tf
 
 
 class Sample:
@@ -177,8 +178,11 @@ class data_loader:
                 batchRange = range(self.currIdx, self.currIdx + self.batchSize)
 
                 gtTexts = np.ones([self.batchSize, config.OUTPUT_SHAPE], dtype=np.int32) * len(self.charList)
-                input_length = np.ones((self.batchSize,)) * config.OUTPUT_SHAPE
-                label_length = np.zeros((self.batchSize, 1))
+                # input_length should be the sequence length of the model's output (y_pred)
+                # For Easter2 model: Input width 2304 -> s=2 -> 1152 -> s=2 -> 576. Stays 576 after that.
+                actual_model_output_seq_len = config.INPUT_WIDTH // 4 
+                input_length = np.full((self.batchSize,), actual_model_output_seq_len, dtype=np.int32)
+                label_length = np.zeros((self.batchSize, 1), dtype=np.int32)
                 # Initialize imgs with shape (batch_size, INPUT_WIDTH, INPUT_HEIGHT)
                 imgs = np.zeros([self.batchSize, config.INPUT_WIDTH, config.INPUT_HEIGHT], dtype=np.float32)
 

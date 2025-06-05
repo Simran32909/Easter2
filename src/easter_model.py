@@ -445,6 +445,10 @@ class CERCallback(Callback):
                 logits = self.prediction_model.predict_on_batch(val_imgs)
                 logits = tf.cast(logits, tf.float32)
 
+                # The actual sequence length from logits for ctc_loss's logit_length
+                # For Easter2 model: Input width 2304 -> s=2 -> 1152 -> s=2 -> 576.
+                # This should dynamically get the length from the logits tensor.
+                current_batch_logit_length = np.full((tf.shape(logits)[0].numpy(),), tf.shape(logits)[1].numpy(), dtype=np.int32)
 
                 # Calculate CTC loss for the batch
                 sparse_labels = tf.keras.backend.ctc_label_dense_to_sparse(val_gtTexts_encoded, val_label_length)
@@ -453,7 +457,7 @@ class CERCallback(Callback):
                     labels=sparse_labels,
                     logits=logits,
                     label_length=val_label_length,
-                    logit_length=val_input_length, # Should be (batch_size, num_timesteps_after_cnn)
+                    logit_length=current_batch_logit_length, # Use the actual logit length here
                     blank_index=len(self.char_list), # config.VOCAB_SIZE - 1, where VOCAB_SIZE = len(charList) + 1
                     logits_time_major=False
                 )
