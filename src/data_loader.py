@@ -143,11 +143,12 @@ class data_loader:
         # Resize to target dimensions if needed
         if img.shape != (config.INPUT_HEIGHT, config.INPUT_WIDTH):
             img = cv2.resize(img, (config.INPUT_WIDTH, config.INPUT_HEIGHT))
+        
+        # Transpose to (width, height) to match model's expected input (steps, features)
+        img = img.transpose((1, 0))
 
         # Invert image (black text on white background -> white text on black background)
         img = 1.0 - img
-
-        img = np.expand_dims(img, axis=-1)
 
         return img
 
@@ -174,7 +175,8 @@ class data_loader:
                 gtTexts = np.ones([self.batchSize, config.OUTPUT_SHAPE], dtype=np.int32) * len(self.charList)
                 input_length = np.ones((self.batchSize,)) * config.OUTPUT_SHAPE
                 label_length = np.zeros((self.batchSize, 1))
-                imgs = np.zeros([self.batchSize, config.INPUT_HEIGHT, config.INPUT_WIDTH, 1], dtype=np.float32)
+                # Initialize imgs with shape (batch_size, INPUT_WIDTH, INPUT_HEIGHT)
+                imgs = np.zeros([self.batchSize, config.INPUT_WIDTH, config.INPUT_HEIGHT], dtype=np.float32)
 
 
                 j = 0
@@ -206,7 +208,7 @@ class data_loader:
 
                     except Exception as e:
                         print(f"Error processing sample {i}: {e}")
-                        # Create dummy data
+                        # Create dummy data with shape (INPUT_WIDTH, INPUT_HEIGHT)
                         imgs[j] = np.zeros((config.INPUT_WIDTH, config.INPUT_HEIGHT))
                         gtTexts[j] = np.ones(config.OUTPUT_SHAPE) * len(self.charList)
                         label_length[j] = 1
