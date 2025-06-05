@@ -132,6 +132,7 @@ class data_loader:
 
     def preprocess(self, img, augment=True):
         if img is None:
+            # Initialize with (Height, Width) as cv2.resize output this format
             img = np.zeros((config.INPUT_HEIGHT, config.INPUT_WIDTH), dtype=np.uint8)
 
         if augment and len(self.samples) > 3000:  # Only augment on training set
@@ -140,18 +141,21 @@ class data_loader:
         # Scaling image [0, 1]
         img = img.astype(np.float32) / 255.0
 
-        # Resize to target dimensions if needed
-        if img.shape != (config.INPUT_HEIGHT, config.INPUT_WIDTH):
+        # Resize to target dimensions if needed.
+        # cv2.resize takes (width, height) for dsize, and returns an array of shape (height, width).
+        # So, after this step, img.shape will be (config.INPUT_HEIGHT, config.INPUT_WIDTH).
+        if img.shape[0] != config.INPUT_HEIGHT or img.shape[1] != config.INPUT_WIDTH:
             img = cv2.resize(img, (config.INPUT_WIDTH, config.INPUT_HEIGHT))
         
-        # Transpose to (width, height) to match model's expected input (steps, features)
+        # Transpose from (INPUT_HEIGHT, INPUT_WIDTH) to (INPUT_WIDTH, INPUT_HEIGHT)
+        # This matches the model's expected input_shape = (INPUT_WIDTH, INPUT_HEIGHT)
         img = img.transpose((1, 0))
 
         # Invert image (black text on white background -> white text on black background)
         img = 1.0 - img
 
+        # Ensure no extra channel dimension is present
         return img
-
 
     def apply_taco_augmentations(self, input_img):
         """Apply TACO augmentations"""
