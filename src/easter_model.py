@@ -546,7 +546,7 @@ def train():
             logits = model(inputs, training=True)  # shape: (batch_size, time_steps, vocab_size)
 
             input_length = tf.cast(input_length, tf.int32)
-            label_length = tf.cast(label_length, tf.int32)
+            label_length = tf.reshape(label_length, [-1])
             logits = tf.cast(logits, tf.float32)
 
             tf.print("logits shape:", tf.shape(logits))
@@ -563,13 +563,13 @@ def train():
                 logit_length=input_length,
                 blank_index=config.VOCAB_SIZE - 1,
                 logits_time_major=False
-            )
+                )
 
             loss = tf.reduce_mean(loss)
 
         gradients = tape.gradient(loss, model.trainable_variables)
         model.optimizer.apply_gradients(zip(gradients, model.trainable_variables))
-    
+
         return loss
     
 
