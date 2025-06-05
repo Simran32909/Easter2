@@ -540,33 +540,38 @@ def train():
     # Update config with actual vocab size
     config.VOCAB_SIZE = len(training_data.charList) + 1  # +1 for blank token
 
-    # Custom training loop with external CTC loss
     @tf.function
     def train_step(inputs, labels, input_length, label_length):
         with tf.GradientTape() as tape:
-            # Forward pass
-            logits = model(inputs, training=True)
-            
-            # Compute CTC loss using TensorFlow's native implementation
+            logits = model(inputs, training=True)  # shape: (batch_size, time_steps, vocab_size)
+
+            input_length = tf.cast(input_length, tf.int32)
+            label_length = tf.cast(label_length, tf.int32)
+            logits = tf.cast(logits, tf.float32)
+
+            tf.print("logits shape:", tf.shape(logits))
+            tf.print("labels shape:", tf.shape(labels))
+            tf.print("input_length:", input_length)
+            tf.print("label_length:", label_length)
+
+            sparse_labels = tf.keras.backend.ctc_label_dense_to_sparse(labels, label_length)
+
             loss = tf.nn.ctc_loss(
-                labels=labels,
+                labels=sparse_labels,
                 logits=logits,
                 label_length=label_length,
                 logit_length=input_length,
-                blank_index=config.VOCAB_SIZE - 1,  # Last index is blank
+                blank_index=config.VOCAB_SIZE - 1,
                 logits_time_major=False
             )
-            
-            # Average loss across batch
+
             loss = tf.reduce_mean(loss)
-        
-        # Compute gradients
+
         gradients = tape.gradient(loss, model.trainable_variables)
-        
-        # Apply gradients
         model.optimizer.apply_gradients(zip(gradients, model.trainable_variables))
-        
+    
         return loss
+    
 
     # Prepare callbacks and training parameters
     CHECKPOINT = tensorflow.keras.callbacks.ModelCheckpoint(
