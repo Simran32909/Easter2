@@ -11,6 +11,7 @@ from editdistance import eval as edit_distance
 import psutil
 import GPUtil
 from keras.callbacks import Callback
+from tqdm import tqdm
 
 
 def ctc_loss(args):
@@ -270,7 +271,7 @@ def Easter2():
     )
 
     # Defining other training parameters
-    Optimizer = tensorflow.keras.optimizers.Adam(learning_rate=config.LEARNING_RATE)
+    Optimizer = tensorflow.keras.optimizers.Adam(learning_rate=config.LEARNING_RATE, clipnorm=1.0)
     
     # Compile model with standard categorical crossentropy
     model.compile(
@@ -605,19 +606,26 @@ def train():
         )
         callbacks_list.append(WANDB_CALLBACK)
 
-    # Training loop
+    # Training loop with tqdm progress bars
     print("Starting custom training loop...")
-    for epoch in range(config.EPOCHS):
-        print(f"Epoch {epoch+1}/{config.EPOCHS}")
+    for epoch in tqdm(range(config.EPOCHS), desc="Epochs", position=0):
+        print(f"\nEpoch {epoch+1}/{config.EPOCHS}")
         
         # Reset data generators
         training_data.trainSet()
         validation_data.validationSet()
         
-        # Training phase
+        # Training phase with batch progress bar
         total_train_loss = 0.0
         train_batches = 0
-        for inputs, outputs in training_data.getNext('train'):
+        
+        # Create a tqdm progress bar for batches
+        batch_iterator = tqdm(training_data.getNext('train'), 
+                               desc="Training Batches", 
+                               position=1, 
+                               leave=False)
+        
+        for inputs, outputs in batch_iterator:
             # Unpack inputs
             batch_inputs = inputs['the_input']
             batch_labels = inputs['the_labels']
@@ -628,6 +636,12 @@ def train():
             loss = train_step(batch_inputs, batch_labels, batch_input_length, batch_label_length)
             total_train_loss += loss.numpy()
             train_batches += 1
+            
+            # Update batch progress bar
+            batch_iterator.set_postfix({'loss': f'{loss.numpy():.4f}'})
+        
+        # Close batch progress bar
+        batch_iterator.close()
         
         # Average training loss
         avg_train_loss = total_train_loss / train_batches
