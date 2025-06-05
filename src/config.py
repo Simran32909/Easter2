@@ -14,7 +14,7 @@ LONG_LINES_FRACTION = 0.3
 
 # Model training parameters
 BATCH_SIZE = 1
-EPOCHS = 100
+EPOCHS = 500
 VOCAB_SIZE = 163
 DROPOUT = True
 OUTPUT_SHAPE = 143
@@ -41,7 +41,7 @@ BATCH_NORM_DECAY = 0.997
 CHECKPOINT_PATH = 'weights/EASTER2--{epoch:02d}--{val_loss:.4f}--{val_cer:.4f}.keras'
 LOGS_DIR = 'logs'
 BEST_MODEL_PATH = "weights/best_model.keras"
-FINAL_MODEL_PATH = "weights/final_model.keras"
+FINAL_MODEL_PATH = 'weights/final_model.weights.h5'
 
 # WandB Configuration
 WANDB_PROJECT = "easter2-sharada-ocr"

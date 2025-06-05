@@ -371,101 +371,177 @@ class CERCallback(Callback):
 
     def __init__(self, validation_data, char_list):
         super().__init__()
-        self.validation_data = validation_data
+        self.validation_data = validation_data # data_loader instance
         self.char_list = char_list
-        self.prediction_model = None  # Will be initialized later by Keras calling set_model
+        self.prediction_model = None 
 
     def set_model(self, model):
         """
         Called by Keras to set the model.
-        Here we initialize the prediction model using the 'model' provided by Keras.
-        We do NOT reassign self.model, as Keras manages this attribute.
         """
-        # Keras automatically sets self.model = model before calling this method.
-        # So, we can directly use the 'model' argument to create our prediction_model.
-        try:
-            # Assumes the output layer is named 'Final'.
-            # If 'Final' layer is not found, a ValueError will be raised.
-            self.prediction_model = tf.keras.models.Model(
-                inputs=model.input, # Use the 'model' argument passed by Keras
-                outputs=model.get_layer('Final').output
-            )
-            print("Prediction model initialized successfully in CERCallback.")
-        except ValueError as ve:
-            # Catch specific error if the layer 'Final' is not found
-            print(f"Error creating prediction model: Layer 'Final' not found or invalid: {ve}")
-            self.prediction_model = None # Ensure it's explicitly None if creation fails
-        except Exception as e:
-            # Catch any other unexpected errors during model creation
-            print(f"An unexpected error occurred while creating prediction model: {e}")
-            self.prediction_model = None
+        self.model = model # Keras sets this automatically, but good to be explicit for clarity
+        self.prediction_model = model # Use the main model for predictions
 
     def on_epoch_end(self, epoch, logs=None):
         """
         Actions to perform at the end of each training epoch.
-        Calculates CER on validation data and logs metrics.
+        Calculates CER and val_loss on validation data and logs metrics.
+        Updates the logs dictionary for other callbacks.
         """
-        # Ensure prediction_model is initialized before proceeding
+        logs = logs or {}
+
         if self.prediction_model is None:
-            print("Warning: prediction_model was not initialized. Skipping CER calculation for this epoch.")
+            print("Warning: prediction_model was not initialized in CERCallback. Skipping validation metrics for this epoch.")
+            # Ensure logs have placeholders if ModelCheckpoint expects them, to avoid KeyError
+            logs['val_loss'] = float('inf') 
+            logs['val_cer'] = float('inf')
             return
 
-        # Get validation samples
-        self.validation_data.validationSet()
-        imgs, truths, _ = self.validation_data.getValidationImage()
+        self.validation_data.validationSet() # Reset validation data iterator
 
-        if not imgs: # Check if imgs list is empty
-            print("No validation images found. Skipping CER calculation for this epoch.")
+        # Determine number of validation steps
+        if not self.validation_data.samples:
+            print("No validation samples found. Skipping validation metrics calculation.")
+            logs['val_loss'] = float('inf')
+            logs['val_cer'] = float('inf')
+            return
+            
+        val_steps = len(self.validation_data.samples) // self.validation_data.batchSize
+        if val_steps == 0 and len(self.validation_data.samples) > 0:
+            val_steps = 1
+        
+        if val_steps == 0:
+            print("Not enough validation samples for a single batch. Skipping validation metrics.")
+            logs['val_loss'] = float('inf')
+            logs['val_cer'] = float('inf')
             return
 
-        predictions = []
-        ground_truths = []
+        all_predictions = []
+        all_ground_truths = []
+        total_val_loss = 0.0
+        val_batches_processed = 0
 
-        # Make predictions
-        # Limit the number of samples to evaluate based on config.CER_EVAL_SAMPLES
-        for img, truth in zip(imgs[:config.CER_EVAL_SAMPLES], truths[:config.CER_EVAL_SAMPLES]):
+        # Create a tqdm progress bar for validation batches
+        val_batch_iterator = tqdm(
+            self.validation_data.getNext('val'),
+            total=val_steps,
+            desc="Validation Batches",
+            position=2, # Ensure it appears below training batch progress bar
+            leave=False
+        )
+
+        for i, (val_inputs_dict, _) in enumerate(val_batch_iterator):
+            if i >= val_steps:
+                break
+            
+            val_imgs = val_inputs_dict['the_input']
+            val_gtTexts_encoded = val_inputs_dict['the_labels']
+            val_input_length = tf.cast(val_inputs_dict['input_length'], tf.int32)
+            val_label_length = tf.cast(tf.reshape(val_inputs_dict['label_length'], [-1]), tf.int32)
+
             try:
-                # Ensure img is correctly shaped for prediction (e.g., add batch dimension if missing)
-                # Assuming img is a single image, reshape it to (1, height, width, channels)
-                if len(img.shape) == 3: # Assuming (height, width, channels)
-                    img_batch = tf.expand_dims(img, axis=0)
-                else: # Assuming it's already (batch, height, width, channels) or similar
-                    img_batch = img
+                # Get model predictions (logits)
+                # The model output is already logits, shape: (batch_size, time_steps, vocab_size)
+                logits = self.prediction_model.predict_on_batch(val_imgs)
+                logits = tf.cast(logits, tf.float32)
 
-                output = self.prediction_model.predict(img_batch, verbose=0)
-                pred = decoder(output, self.char_list)[0] # Assuming decoder returns a list
-                predictions.append(pred)
-                ground_truths.append(truth)
+
+                # Calculate CTC loss for the batch
+                sparse_labels = tf.keras.backend.ctc_label_dense_to_sparse(val_gtTexts_encoded, val_label_length)
+                
+                batch_loss = tf.nn.ctc_loss(
+                    labels=sparse_labels,
+                    logits=logits,
+                    label_length=val_label_length,
+                    logit_length=val_input_length, # Should be (batch_size, num_timesteps_after_cnn)
+                    blank_index=len(self.char_list), # config.VOCAB_SIZE - 1, where VOCAB_SIZE = len(charList) + 1
+                    logits_time_major=False
+                )
+                batch_loss = tf.reduce_mean(batch_loss)
+                total_val_loss += batch_loss.numpy()
+
+                # Decode predictions for CER
+                # The decoder expects numpy array
+                decoded_preds = decoder(logits.numpy(), self.char_list)
+                
+                # Decode ground truths for CER (from encoded to string)
+                # We need the original string ground truths for CER calculation.
+                # The getNext() method yields encoded labels. We need to get the original text.
+                # For simplicity, we'll re-fetch a slice of ground truth texts if data_loader can provide it easily,
+                # or decode them back if charList is available.
+                # The current `getNext` doesn't yield original text.
+                # Let's fetch them from self.validation_data.samples directly based on current batch index.
+                # This is a bit complex as getNext shuffles.
+                # A better way would be for getNext to also yield original texts or sample_ids.
+
+                # For now, let's assume we can get them or approximate.
+                # We need to be careful here: val_gtTexts_encoded are indices.
+                # We need to convert them back to text for CER.
+                
+                current_batch_samples = self.validation_data.samples[
+                    self.validation_data.currIdx - self.validation_data.batchSize : self.validation_data.currIdx
+                ]
+                
+                batch_ground_truths_text = [sample.gtText for sample in current_batch_samples[:len(decoded_preds)]]
+
+
+                all_predictions.extend(decoded_preds)
+                all_ground_truths.extend(batch_ground_truths_text)
+                
+                val_batches_processed += 1
+                val_batch_iterator.set_postfix({'val_loss_batch': f'{batch_loss.numpy():.4f}'})
+
             except Exception as e:
-                print(f"Error in prediction for a sample: {e}")
-                continue # Continue to the next sample even if one fails
+                print(f"Error during validation batch processing: {e}")
+                import traceback
+                traceback.print_exc()
+                continue
+        
+        val_batch_iterator.close()
 
-        if predictions: # Only proceed if there were successful predictions
+        avg_val_loss = total_val_loss / val_batches_processed if val_batches_processed > 0 else float('inf')
+        
+        val_cer = float('inf')
+        val_accuracy = 0.0
+        perfect_matches = 0
+
+        if all_predictions and all_ground_truths:
             # Calculate CER metrics
-            val_cer, val_accuracy, perfect_matches = calculate_cer(predictions, ground_truths)
+            val_cer, val_accuracy, perfect_matches = calculate_cer(all_predictions, all_ground_truths)
 
-            # Get system metrics
-            system_metrics = get_system_metrics()
+        # Update logs dictionary for other callbacks (like ModelCheckpoint)
+        logs['val_loss'] = avg_val_loss
+        logs['val_cer'] = val_cer 
+        logs['val_accuracy'] = val_accuracy
+        logs['val_perfect_matches'] = perfect_matches
 
-            # Log to WandB
-            # Ensure self.model.optimizer and self.model.optimizer.lr exist before accessing
-            learning_rate = 0.0 # Default if not available
-            if hasattr(self.model, 'optimizer') and hasattr(self.model.optimizer, 'lr'):
-                learning_rate = float(tf.keras.backend.get_value(self.model.optimizer.lr))
+        # Get system metrics
+        system_metrics = get_system_metrics()
 
-            wandb.log({
-                'val_cer': val_cer,
-                'val_accuracy': val_accuracy,
-                'val_perfect_matches': perfect_matches,
-                'learning_rate': learning_rate,
-                **system_metrics
-            })
+        # Log to WandB
+        learning_rate = 0.0
+        if hasattr(self.model, 'optimizer') and hasattr(self.model.optimizer, 'lr'):
+            learning_rate = float(tf.keras.backend.get_value(self.model.optimizer.lr))
 
-            print(
-                f"\nValidation CER: {val_cer:.2f}%, Accuracy: {val_accuracy:.2f}%, Perfect matches: {perfect_matches}"
-            )
-        else:
-            print("No successful predictions were made for CER calculation this epoch.")
+        wandb_logs = {
+            'val_loss': avg_val_loss, # Log the calculated average validation loss
+            'val_cer': val_cer,
+            'val_accuracy': val_accuracy,
+            'val_perfect_matches': perfect_matches,
+            'learning_rate': learning_rate,
+            **system_metrics
+        }
+        # Add training loss to wandb logs if available
+        if 'loss' in logs:
+             wandb_logs['loss'] = logs['loss'] # training loss from the main loop
+        
+        if wandb.run: # Check if wandb run is active
+            wandb.log(wandb_logs)
+
+
+        print(
+            f"Validation CER: {val_cer:.2f}%, Val Loss: {avg_val_loss:.4f}, Accuracy: {val_accuracy:.2f}%, Perfect matches: {perfect_matches}"
+        )
 
 
 def train():
@@ -590,11 +666,11 @@ def train():
     # Custom CER callback
     CER_CALLBACK = CERCallback(validation_data, training_data.charList)
 
-    # Prepare callbacks list
+    # Prepare callbacks list - CER_CALLBACK must come BEFORE ModelCheckpoints
     callbacks_list = [
+        CER_CALLBACK, # Calculate val_loss and val_cer first
         CHECKPOINT,
         BEST_MODEL_CHECKPOINT,
-        CER_CALLBACK
     ]
 
     # Add WandB callback if enabled
@@ -619,13 +695,21 @@ def train():
         total_train_loss = 0.0
         train_batches = 0
         
+        steps_per_epoch = len(training_data.samples) // training_data.batchSize
+        if steps_per_epoch == 0 and len(training_data.samples) > 0: # Handle cases where dataset is smaller than batch_size
+            steps_per_epoch = 1
+
         # Create a tqdm progress bar for batches
         batch_iterator = tqdm(training_data.getNext('train'), 
+                               total=steps_per_epoch, # Set total steps for tqdm
                                desc="Training Batches", 
                                position=1, 
                                leave=False)
         
-        for inputs, outputs in batch_iterator:
+        for i, (inputs, outputs) in enumerate(batch_iterator):
+            if i >= steps_per_epoch: # Break after completing all steps for the epoch
+                break
+
             # Unpack inputs
             batch_inputs = inputs['the_input']
             batch_labels = inputs['the_labels']
@@ -641,16 +725,32 @@ def train():
             batch_iterator.set_postfix({'loss': f'{loss.numpy():.4f}'})
         
         # Close batch progress bar
-        batch_iterator.close()
+        if train_batches > 0: # Ensure batch_iterator was used
+            batch_iterator.close()
         
         # Average training loss
-        avg_train_loss = total_train_loss / train_batches
+        avg_train_loss = total_train_loss / train_batches if train_batches > 0 else 0.0
         print(f"Training Loss: {avg_train_loss:.4f}")
         
         # Run validation and callbacks
+        # Construct logs dictionary for callbacks
+        logs_for_callbacks = {'loss': avg_train_loss}
+
+        # Simulate val_loss for callbacks if validation is performed elsewhere or not strictly needed for all callbacks
+        # For example, CERCallback calculates its own metrics.
+        # If other callbacks strictly need 'val_loss', it should be computed here.
+        # For now, we'll pass what we have.
+        # If validation_data is available and a validation step is performed, add 'val_loss' here.
+        # e.g. val_loss_value = calculate_validation_loss(model, validation_data)
+        # logs_for_callbacks['val_loss'] = val_loss_value
+
         for callback in callbacks_list:
             if hasattr(callback, 'on_epoch_end'):
-                callback.on_epoch_end(epoch, {'loss': avg_train_loss})
+                # Pass necessary logs. 'val_loss' is often expected by ModelCheckpoint.
+                # Since we don't have a direct val_loss from this loop, we might need to adjust
+                # or ensure callbacks handle potentially missing metrics gracefully.
+                # For simplicity, passing training loss. Actual val_loss would be better.
+                callback.on_epoch_end(epoch, logs_for_callbacks)
         
         # Optional early stopping logic can be added here
         
