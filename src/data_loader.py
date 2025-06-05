@@ -226,7 +226,8 @@ class data_loader:
                     'input_length': input_length,
                     'label_length': label_length,
                 }
-                outputs = {'loss_output': np.zeros([self.batchSize])}
+                # Simple array of zeros as dummy targets for the CTC loss
+                outputs = np.zeros([self.batchSize])
                 yield (inputs, outputs)
             else:
                 self.currIdx = 0

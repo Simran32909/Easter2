@@ -271,19 +271,25 @@ def Easter2():
         dtype='int64'
     )
 
-    output = tensorflow.keras.layers.Lambda(
-        ctc_custom, output_shape=(1,), name='loss_output'
+    # Calculate CTC loss as part of the model
+    loss_output = tensorflow.keras.layers.Lambda(
+        ctc_custom, output_shape=(1,)
     )([y_pred, labels, input_length, label_length])
 
-    # compiling model
+    # Create model with explicit inputs and outputs
     model = tensorflow.keras.models.Model(
-        inputs=[input_data, labels, input_length, label_length], outputs=output
+        inputs=[input_data, labels, input_length, label_length], 
+        outputs=loss_output
     )
-    def ctc_lambda_func(y_true, y_pred):
-        # This lambda function is a placeholder for Keras's loss compilation.
-        # The actual CTC loss calculation happens within the 'ctc_custom' Lambda layer.
+    
+    # Use a simple loss function that just returns the model output
+    # The actual CTC loss calculation happens in the Lambda layer
+    def identity_loss(y_true, y_pred):
         return y_pred
-    model.compile(loss={'loss_output': ctc_lambda_func}, optimizer=Optimizer)
+        
+    # Compile model with the identity loss function
+    model.compile(loss=identity_loss, optimizer=Optimizer)
+    
     return model
 
 
