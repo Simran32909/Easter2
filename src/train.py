@@ -274,29 +274,33 @@ def main():
     try:
         # Start training
         print("Starting training...")
-        history = train()
+        model = train()
         print("Training completed successfully!")
 
         # Print final summary
         print("\n" + "=" * 80)
         print("TRAINING SUMMARY")
         print("=" * 80)
-        print(f"Total epochs completed: {len(history.history['loss'])}")
-        print(f"Final training loss: {history.history['loss'][-1]:.4f}")
 
-        # Check for CER metrics in history
-        if 'val_loss' in history.history:
-            print(f"Final validation loss: {history.history['val_loss'][-1]:.4f}")
+        # Check if model has a history attribute
+        if hasattr(model, 'history'):
+            history = model.history
+            print(f"Total epochs completed: {len(history.history['loss'])}")
+            print(f"Final training loss: {history.history['loss'][-1]:.4f}")
 
-        # Look for CER metrics that might be logged by the CERCallback
-        for key in history.history.keys():
-            if 'cer' in key.lower():
-                print(f"Final {key}: {history.history[key][-1]:.4f}")
-            elif 'accuracy' in key.lower():
-                print(f"Final {key}: {history.history[key][-1]:.4f}%")
+            # Check for CER metrics in history
+            if 'val_loss' in history.history:
+                print(f"Final validation loss: {history.history['val_loss'][-1]:.4f}")
+
+            # Look for CER metrics that might be logged by the CERCallback
+            for key in history.history.keys():
+                if 'cer' in key.lower():
+                    print(f"Final {key}: {history.history[key][-1]:.4f}")
+                elif 'accuracy' in key.lower():
+                    print(f"Final {key}: {history.history[key][-1]:.4f}%")
 
         print(f"Best model saved to: {config.BEST_MODEL_PATH}")
-        print(f"Final model saved to: ../weights/final_model.hdf5")
+        print(f"Final model saved to: {config.FINAL_MODEL_PATH}")
         print("=" * 80)
 
     except KeyboardInterrupt:

@@ -539,50 +539,6 @@ def train():
     # Update config with actual vocab size
     config.VOCAB_SIZE = len(training_data.charList) + 1  # +1 for blank token
 
-    @tf.function
-    def train_step(inputs, labels, input_length, label_length):
-        with tf.GradientTape() as tape:
-            logits = model(inputs, training=True)  # shape: (batch_size, time_steps, vocab_size)
-
-            # Add softmax activation to logits (important for CTC stability)
-            logits = tf.nn.softmax(logits, axis=-1)
-            
-            # Ensure proper casting and reshaping
-            input_length = tf.cast(input_length, tf.int32)
-            label_length = tf.cast(tf.reshape(label_length, [-1]), tf.int32)
-            logits = tf.cast(logits, tf.float32)
-
-            sparse_labels = tf.keras.backend.ctc_label_dense_to_sparse(labels, label_length)
-
-            # Add a small epsilon to prevent log(0)
-            logits = tf.clip_by_value(logits, 1e-7, 1.0 - 1e-7)
-            
-            # CTC loss calculation
-            loss = tf.nn.ctc_loss(
-                labels=sparse_labels,
-                logits=logits,
-                label_length=label_length,
-                logit_length=input_length,
-                blank_index=config.VOCAB_SIZE - 1,
-                logits_time_major=False
-            )
-
-            # Check for and filter out any NaN values
-            loss = tf.where(tf.math.is_nan(loss), tf.zeros_like(loss), loss)
-            loss = tf.reduce_mean(loss)
-
-        # Compute gradients
-        gradients = tape.gradient(loss, model.trainable_variables)
-        
-        # Clip gradients to prevent extreme values
-        gradients, _ = tf.clip_by_global_norm(gradients, 5.0)
-        
-        # Apply gradients
-        model.optimizer.apply_gradients(zip(gradients, model.trainable_variables))
-
-        return loss
-    
-
     # Prepare callbacks and training parameters
     CHECKPOINT = tensorflow.keras.callbacks.ModelCheckpoint(
         filepath=config.CHECKPOINT_PATH,
@@ -620,69 +576,52 @@ def train():
         )
         callbacks_list.append(WANDB_CALLBACK)
 
-    # Training loop with tqdm progress bars
-    print("Starting custom training loop...")
-    for epoch in tqdm(range(config.EPOCHS), desc="Epochs", position=0):
-        print(f"\nEpoch {epoch+1}/{config.EPOCHS}")
+    # Prepare training data generator
+    train_generator = training_data.getNext('train')
+    val_generator = validation_data.getNext('validation')
+
+    # Compile the model with a custom loss function
+    def ctc_loss_wrapper(y_true, y_pred):
+        input_length = tf.fill([tf.shape(y_pred)[0]], tf.shape(y_pred)[1])
+        label_length = tf.reduce_sum(tf.cast(tf.not_equal(y_true, len(training_data.charList)), tf.int32), axis=1)
         
-        # Reset data generators
-        training_data.trainSet()
-        validation_data.validationSet()
+        sparse_labels = tf.keras.backend.ctc_label_dense_to_sparse(y_true, label_length)
         
-        # Training phase with batch progress bar
-        total_train_loss = 0.0
-        train_batches = 0
+        loss = tf.nn.ctc_loss(
+            labels=sparse_labels,
+            logits=y_pred,
+            label_length=label_length,
+            logit_length=input_length,
+            blank_index=config.VOCAB_SIZE - 1,
+            logits_time_major=False
+        )
         
-        # Create a tqdm progress bar for batches
-        batch_iterator = tqdm(training_data.getNext('train'), 
-                               desc="Training Batches", 
-                               position=1, 
-                               leave=False)
-        
-        for inputs, outputs in batch_iterator:
-            try:
-                # Unpack inputs
-                batch_inputs = inputs['the_input']
-                batch_labels = inputs['the_labels']
-                batch_input_length = inputs['input_length']
-                batch_label_length = inputs['label_length']
-                
-                # Skip batch if any NaN values are detected in inputs
-                if np.any(np.isnan(batch_inputs)):
-                    print("Warning: NaN values detected in inputs, skipping batch")
-                    continue
-                
-                # Perform training step
-                loss = train_step(batch_inputs, batch_labels, batch_input_length, batch_label_length)
-                
-                # Check if loss is valid
-                if tf.math.is_nan(loss) or tf.math.is_inf(loss):
-                    print("Warning: NaN or Inf loss detected, skipping batch")
-                    continue
-                
-                total_train_loss += loss.numpy()
-                train_batches += 1
-                
-                # Update batch progress bar
-                batch_iterator.set_postfix({'loss': f'{loss.numpy():.4f}'})
-            except Exception as e:
-                print(f"Error during batch processing: {e}")
-                continue
-        
-        # Close batch progress bar
-        batch_iterator.close()
-        
-        # Average training loss
-        avg_train_loss = total_train_loss / train_batches if train_batches > 0 else 0
-        print(f"Training Loss: {avg_train_loss:.4f}")
-        
-        # Run validation and callbacks
-        for callback in callbacks_list:
-            if hasattr(callback, 'on_epoch_end'):
-                callback.on_epoch_end(epoch, {'loss': avg_train_loss})
-        
-        # Optional early stopping logic can be added here
-        
+        return tf.reduce_mean(loss)
+
+    model.compile(
+        optimizer=tensorflow.keras.optimizers.Adam(
+            learning_rate=config.LEARNING_RATE,
+            clipnorm=1.0,
+            epsilon=1e-8,
+            beta_1=0.9,
+            beta_2=0.999
+        ),
+        loss=ctc_loss_wrapper
+    )
+
+    # Prepare validation data
+    val_data = next(val_generator)
+
+    # Fit the model
+    history = model.fit(
+        train_generator,
+        validation_data=val_data,
+        epochs=config.EPOCHS,
+        callbacks=callbacks_list,
+        steps_per_epoch=len(training_data.samples) // config.BATCH_SIZE,
+        validation_steps=1
+    )
+
     # Save final model
     model.save_weights(config.FINAL_MODEL_PATH)
 
@@ -690,7 +629,7 @@ def train():
     if use_wandb:
         wandb.finish()
 
-    return None  # Modify return as needed for your tracking requirements
+    return model  # Return the trained model
 
 
 if __name__ == "__main__":
