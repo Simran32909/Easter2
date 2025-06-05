@@ -271,7 +271,13 @@ def Easter2():
     )
 
     # Defining other training parameters
-    Optimizer = tensorflow.keras.optimizers.Adam(learning_rate=config.LEARNING_RATE, clipnorm=1.0)
+    Optimizer = tensorflow.keras.optimizers.Adam(
+        learning_rate=config.LEARNING_RATE,
+        clipnorm=1.0,
+        epsilon=1e-8,  # Increased epsilon for better numerical stability
+        beta_1=0.9,
+        beta_2=0.999
+    )
     
     # Compile model with standard categorical crossentropy
     model.compile(
@@ -379,25 +385,17 @@ class CERCallback(Callback):
         """
         Called by Keras to set the model.
         Here we initialize the prediction model using the 'model' provided by Keras.
-        We do NOT reassign self.model, as Keras manages this attribute.
         """
-        # Keras automatically sets self.model = model before calling this method.
-        # So, we can directly use the 'model' argument to create our prediction_model.
+        super().set_model(model)
         try:
-            # Assumes the output layer is named 'Final'.
-            # If 'Final' layer is not found, a ValueError will be raised.
+            # Use the 'Final' layer which we now know exists in the model
             self.prediction_model = tf.keras.models.Model(
-                inputs=model.input, # Use the 'model' argument passed by Keras
+                inputs=model.input,
                 outputs=model.get_layer('Final').output
             )
             print("Prediction model initialized successfully in CERCallback.")
-        except ValueError as ve:
-            # Catch specific error if the layer 'Final' is not found
-            print(f"Error creating prediction model: Layer 'Final' not found or invalid: {ve}")
-            self.prediction_model = None # Ensure it's explicitly None if creation fails
         except Exception as e:
-            # Catch any other unexpected errors during model creation
-            print(f"An unexpected error occurred while creating prediction model: {e}")
+            print(f"Error creating prediction model: {e}")
             self.prediction_model = None
 
     def on_epoch_end(self, epoch, logs=None):
@@ -546,12 +544,20 @@ def train():
         with tf.GradientTape() as tape:
             logits = model(inputs, training=True)  # shape: (batch_size, time_steps, vocab_size)
 
+            # Add softmax activation to logits (important for CTC stability)
+            logits = tf.nn.softmax(logits, axis=-1)
+            
+            # Ensure proper casting and reshaping
             input_length = tf.cast(input_length, tf.int32)
             label_length = tf.cast(tf.reshape(label_length, [-1]), tf.int32)
             logits = tf.cast(logits, tf.float32)
 
             sparse_labels = tf.keras.backend.ctc_label_dense_to_sparse(labels, label_length)
 
+            # Add a small epsilon to prevent log(0)
+            logits = tf.clip_by_value(logits, 1e-7, 1.0 - 1e-7)
+            
+            # CTC loss calculation
             loss = tf.nn.ctc_loss(
                 labels=sparse_labels,
                 logits=logits,
@@ -559,11 +565,19 @@ def train():
                 logit_length=input_length,
                 blank_index=config.VOCAB_SIZE - 1,
                 logits_time_major=False
-                )
+            )
 
+            # Check for and filter out any NaN values
+            loss = tf.where(tf.math.is_nan(loss), tf.zeros_like(loss), loss)
             loss = tf.reduce_mean(loss)
 
+        # Compute gradients
         gradients = tape.gradient(loss, model.trainable_variables)
+        
+        # Clip gradients to prevent extreme values
+        gradients, _ = tf.clip_by_global_norm(gradients, 5.0)
+        
+        # Apply gradients
         model.optimizer.apply_gradients(zip(gradients, model.trainable_variables))
 
         return loss
@@ -626,25 +640,40 @@ def train():
                                leave=False)
         
         for inputs, outputs in batch_iterator:
-            # Unpack inputs
-            batch_inputs = inputs['the_input']
-            batch_labels = inputs['the_labels']
-            batch_input_length = inputs['input_length']
-            batch_label_length = inputs['label_length']
-            
-            # Perform training step
-            loss = train_step(batch_inputs, batch_labels, batch_input_length, batch_label_length)
-            total_train_loss += loss.numpy()
-            train_batches += 1
-            
-            # Update batch progress bar
-            batch_iterator.set_postfix({'loss': f'{loss.numpy():.4f}'})
+            try:
+                # Unpack inputs
+                batch_inputs = inputs['the_input']
+                batch_labels = inputs['the_labels']
+                batch_input_length = inputs['input_length']
+                batch_label_length = inputs['label_length']
+                
+                # Skip batch if any NaN values are detected in inputs
+                if np.any(np.isnan(batch_inputs)):
+                    print("Warning: NaN values detected in inputs, skipping batch")
+                    continue
+                
+                # Perform training step
+                loss = train_step(batch_inputs, batch_labels, batch_input_length, batch_label_length)
+                
+                # Check if loss is valid
+                if tf.math.is_nan(loss) or tf.math.is_inf(loss):
+                    print("Warning: NaN or Inf loss detected, skipping batch")
+                    continue
+                
+                total_train_loss += loss.numpy()
+                train_batches += 1
+                
+                # Update batch progress bar
+                batch_iterator.set_postfix({'loss': f'{loss.numpy():.4f}'})
+            except Exception as e:
+                print(f"Error during batch processing: {e}")
+                continue
         
         # Close batch progress bar
         batch_iterator.close()
         
         # Average training loss
-        avg_train_loss = total_train_loss / train_batches
+        avg_train_loss = total_train_loss / train_batches if train_batches > 0 else 0
         print(f"Training Loss: {avg_train_loss:.4f}")
         
         # Run validation and callbacks
