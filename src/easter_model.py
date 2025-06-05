@@ -1,7 +1,7 @@
 import config
 import tensorflow
+import tensorflow as tf
 from tensorflow import keras
-from keras import backend as K
 from data_loader import data_loader
 import wandb
 from wandb.integration.keras import WandbCallback
@@ -11,7 +11,6 @@ from editdistance import eval as edit_distance
 import psutil
 import GPUtil
 from keras.callbacks import Callback
-import tensorflow as tf
 
 
 def ctc_loss(args):
@@ -27,7 +26,7 @@ def ctc_loss(args):
         tf.Tensor: The CTC loss.
     """
     y_pred, labels, input_length, label_length = args
-    return K.ctc_batch_cost(
+    return tf.keras.backend.ctc_batch_cost(
         labels,
         y_pred,
         input_length,
@@ -48,16 +47,16 @@ def ctc_custom(args):
         tf.Tensor: The custom CTC loss including the focal loss component.
     """
     y_pred, labels, input_length, label_length = args
-    ctc_loss = K.ctc_batch_cost(
+    ctc_loss = tf.keras.backend.ctc_batch_cost(
         labels,
         y_pred,
         input_length,
         label_length
     )
-    p = tensorflow.exp(-ctc_loss)
+    p = tf.exp(-ctc_loss)
     gamma = 0.5
     alpha = 0.25
-    return alpha * (K.pow((1 - p), gamma)) * ctc_loss
+    return alpha * (tf.math.pow((1 - p), gamma)) * ctc_loss
 
 
 def batch_norm(inputs):
@@ -456,7 +455,7 @@ class CERCallback(Callback):
             # Ensure self.model.optimizer and self.model.optimizer.lr exist before accessing
             learning_rate = 0.0 # Default if not available
             if hasattr(self.model, 'optimizer') and hasattr(self.model.optimizer, 'lr'):
-                learning_rate = float(K.get_value(self.model.optimizer.lr))
+                learning_rate = float(tf.keras.backend.get_value(self.model.optimizer.lr))
 
             wandb.log({
                 'val_cer': val_cer,
