@@ -171,64 +171,66 @@ class data_loader:
 
     def getNext(self, what='train'):
         """Generator for training batches"""
-        # Calculate total number of complete batches
-        total_batches = len(self.samples) // self.batchSize
-        
-        for batch_num in range(total_batches):
-            # Calculate start and end indices for this batch
-            start_idx = batch_num * self.batchSize
-            end_idx = start_idx + self.batchSize
+        while True:
+            if (self.currIdx + self.batchSize) <= len(self.samples):
 
-            # Prepare batch arrays
-            gtTexts = np.ones([self.batchSize, config.OUTPUT_SHAPE], dtype=np.int32) * len(self.charList)
-            input_length = np.ones((self.batchSize,)) * config.OUTPUT_SHAPE
-            label_length = np.zeros((self.batchSize, 1))
-            imgs = np.zeros([self.batchSize, config.INPUT_WIDTH, config.INPUT_HEIGHT], dtype=np.float32)
+                batchRange = range(self.currIdx, self.currIdx + self.batchSize)
 
-            j = 0
-            for i in range(start_idx, end_idx):
-                try:
-                    img = cv2.imread(self.samples[i].filePath, cv2.IMREAD_GRAYSCALE)
-                    text = self.samples[i].gtText
+                gtTexts = np.ones([self.batchSize, config.OUTPUT_SHAPE], dtype=np.int32) * len(self.charList)
+                input_length = np.ones((self.batchSize,)) * config.OUTPUT_SHAPE
+                label_length = np.zeros((self.batchSize, 1))
+                # Initialize imgs with shape (batch_size, INPUT_WIDTH, INPUT_HEIGHT)
+                imgs = np.zeros([self.batchSize, config.INPUT_WIDTH, config.INPUT_HEIGHT], dtype=np.float32)
 
-                    # Preprocess image
-                    augment = (what == 'train')
-                    img = self.preprocess(img, augment=augment)
-                    imgs[j] = img
 
-                    # Encode text
-                    val = []
-                    for char in text:
-                        if char in self.charList:
-                            val.append(self.charList.index(char))
-                        # Skip unknown characters
+                j = 0
+                for i in batchRange:
+                    try:
+                        img = cv2.imread(self.samples[i].filePath, cv2.IMREAD_GRAYSCALE)
+                        text = self.samples[i].gtText
 
-                    # Pad sequence
-                    if len(val) > config.OUTPUT_SHAPE:
-                        val = val[:config.OUTPUT_SHAPE]
+                        # Preprocess image
+                        augment = (what == 'train')
+                        img = self.preprocess(img, augment=augment)
+                        imgs[j] = img
 
-                    gtTexts[j, :len(val)] = val
-                    label_length[j] = len(val)
+                        # Encode text
+                        val = []
+                        for char in text:
+                            if char in self.charList:
+                                val.append(self.charList.index(char))
+                            # Skip unknown characters
 
-                    j += 1
+                        # Pad sequence
+                        if len(val) > config.OUTPUT_SHAPE:
+                            val = val[:config.OUTPUT_SHAPE]
 
-                except Exception as e:
-                    print(f"Error processing sample {i}: {e}")
-                    # Create dummy data with shape (INPUT_WIDTH, INPUT_HEIGHT)
-                    imgs[j] = np.zeros((config.INPUT_WIDTH, config.INPUT_HEIGHT))
-                    gtTexts[j] = np.ones(config.OUTPUT_SHAPE) * len(self.charList)
-                    label_length[j] = 1
-                    j += 1
+                        gtTexts[j, :len(val)] = val
+                        label_length[j] = len(val)
 
-            inputs = {
-                'the_input': imgs,
-                'the_labels': gtTexts,
-                'input_length': input_length,
-                'label_length': label_length,
-            }
-            # Simple array of zeros as dummy targets for the CTC loss
-            outputs = np.zeros([self.batchSize])
-            yield (inputs, outputs)
+                        j += 1
+
+                    except Exception as e:
+                        print(f"Error processing sample {i}: {e}")
+                        # Create dummy data with shape (INPUT_WIDTH, INPUT_HEIGHT)
+                        imgs[j] = np.zeros((config.INPUT_WIDTH, config.INPUT_HEIGHT))
+                        gtTexts[j] = np.ones(config.OUTPUT_SHAPE) * len(self.charList)
+                        label_length[j] = 1
+                        j += 1
+
+                self.currIdx += self.batchSize
+
+                inputs = {
+                    'the_input': imgs,
+                    'the_labels': gtTexts,
+                    'input_length': input_length,
+                    'label_length': label_length,
+                }
+                # Simple array of zeros as dummy targets for the CTC loss
+                outputs = np.zeros([self.batchSize])
+                yield (inputs, outputs)
+            else:
+                self.currIdx = 0
 
     def getValidationImage(self):
         """Get all validation images for evaluation"""

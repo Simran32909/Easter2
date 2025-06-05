@@ -271,13 +271,7 @@ def Easter2():
     )
 
     # Defining other training parameters
-    Optimizer = tensorflow.keras.optimizers.Adam(
-        learning_rate=config.LEARNING_RATE,
-        clipnorm=1.0,
-        epsilon=1e-8,  # Increased epsilon for better numerical stability
-        beta_1=0.9,
-        beta_2=0.999
-    )
+    Optimizer = tensorflow.keras.optimizers.Adam(learning_rate=config.LEARNING_RATE, clipnorm=1.0)
     
     # Compile model with standard categorical crossentropy
     model.compile(
@@ -385,17 +379,25 @@ class CERCallback(Callback):
         """
         Called by Keras to set the model.
         Here we initialize the prediction model using the 'model' provided by Keras.
+        We do NOT reassign self.model, as Keras manages this attribute.
         """
-        super().set_model(model)
+        # Keras automatically sets self.model = model before calling this method.
+        # So, we can directly use the 'model' argument to create our prediction_model.
         try:
-            # Use the 'Final' layer which we now know exists in the model
+            # Assumes the output layer is named 'Final'.
+            # If 'Final' layer is not found, a ValueError will be raised.
             self.prediction_model = tf.keras.models.Model(
-                inputs=model.input,
+                inputs=model.input, # Use the 'model' argument passed by Keras
                 outputs=model.get_layer('Final').output
             )
             print("Prediction model initialized successfully in CERCallback.")
+        except ValueError as ve:
+            # Catch specific error if the layer 'Final' is not found
+            print(f"Error creating prediction model: Layer 'Final' not found or invalid: {ve}")
+            self.prediction_model = None # Ensure it's explicitly None if creation fails
         except Exception as e:
-            print(f"Error creating prediction model: {e}")
+            # Catch any other unexpected errors during model creation
+            print(f"An unexpected error occurred while creating prediction model: {e}")
             self.prediction_model = None
 
     def on_epoch_end(self, epoch, logs=None):
@@ -539,6 +541,34 @@ def train():
     # Update config with actual vocab size
     config.VOCAB_SIZE = len(training_data.charList) + 1  # +1 for blank token
 
+    @tf.function
+    def train_step(inputs, labels, input_length, label_length):
+        with tf.GradientTape() as tape:
+            logits = model(inputs, training=True)  # shape: (batch_size, time_steps, vocab_size)
+
+            input_length = tf.cast(input_length, tf.int32)
+            label_length = tf.cast(tf.reshape(label_length, [-1]), tf.int32)
+            logits = tf.cast(logits, tf.float32)
+
+            sparse_labels = tf.keras.backend.ctc_label_dense_to_sparse(labels, label_length)
+
+            loss = tf.nn.ctc_loss(
+                labels=sparse_labels,
+                logits=logits,
+                label_length=label_length,
+                logit_length=input_length,
+                blank_index=config.VOCAB_SIZE - 1,
+                logits_time_major=False
+                )
+
+            loss = tf.reduce_mean(loss)
+
+        gradients = tape.gradient(loss, model.trainable_variables)
+        model.optimizer.apply_gradients(zip(gradients, model.trainable_variables))
+
+        return loss
+    
+
     # Prepare callbacks and training parameters
     CHECKPOINT = tensorflow.keras.callbacks.ModelCheckpoint(
         filepath=config.CHECKPOINT_PATH,
@@ -576,52 +606,54 @@ def train():
         )
         callbacks_list.append(WANDB_CALLBACK)
 
-    # Prepare training data generator
-    train_generator = training_data.getNext('train')
-    val_generator = validation_data.getNext('validation')
-
-    # Compile the model with a custom loss function
-    def ctc_loss_wrapper(y_true, y_pred):
-        input_length = tf.fill([tf.shape(y_pred)[0]], tf.shape(y_pred)[1])
-        label_length = tf.reduce_sum(tf.cast(tf.not_equal(y_true, len(training_data.charList)), tf.int32), axis=1)
+    # Training loop with tqdm progress bars
+    print("Starting custom training loop...")
+    for epoch in tqdm(range(config.EPOCHS), desc="Epochs", position=0):
+        print(f"\nEpoch {epoch+1}/{config.EPOCHS}")
         
-        sparse_labels = tf.keras.backend.ctc_label_dense_to_sparse(y_true, label_length)
+        # Reset data generators
+        training_data.trainSet()
+        validation_data.validationSet()
         
-        loss = tf.nn.ctc_loss(
-            labels=sparse_labels,
-            logits=y_pred,
-            label_length=label_length,
-            logit_length=input_length,
-            blank_index=config.VOCAB_SIZE - 1,
-            logits_time_major=False
-        )
+        # Training phase with batch progress bar
+        total_train_loss = 0.0
+        train_batches = 0
         
-        return tf.reduce_mean(loss)
-
-    model.compile(
-        optimizer=tensorflow.keras.optimizers.Adam(
-            learning_rate=config.LEARNING_RATE,
-            clipnorm=1.0,
-            epsilon=1e-8,
-            beta_1=0.9,
-            beta_2=0.999
-        ),
-        loss=ctc_loss_wrapper
-    )
-
-    # Prepare validation data
-    val_data = next(val_generator)
-
-    # Fit the model
-    history = model.fit(
-        train_generator,
-        validation_data=val_data,
-        epochs=config.EPOCHS,
-        callbacks=callbacks_list,
-        steps_per_epoch=len(training_data.samples) // config.BATCH_SIZE,
-        validation_steps=1
-    )
-
+        # Create a tqdm progress bar for batches
+        batch_iterator = tqdm(training_data.getNext('train'), 
+                               desc="Training Batches", 
+                               position=1, 
+                               leave=False)
+        
+        for inputs, outputs in batch_iterator:
+            # Unpack inputs
+            batch_inputs = inputs['the_input']
+            batch_labels = inputs['the_labels']
+            batch_input_length = inputs['input_length']
+            batch_label_length = inputs['label_length']
+            
+            # Perform training step
+            loss = train_step(batch_inputs, batch_labels, batch_input_length, batch_label_length)
+            total_train_loss += loss.numpy()
+            train_batches += 1
+            
+            # Update batch progress bar
+            batch_iterator.set_postfix({'loss': f'{loss.numpy():.4f}'})
+        
+        # Close batch progress bar
+        batch_iterator.close()
+        
+        # Average training loss
+        avg_train_loss = total_train_loss / train_batches
+        print(f"Training Loss: {avg_train_loss:.4f}")
+        
+        # Run validation and callbacks
+        for callback in callbacks_list:
+            if hasattr(callback, 'on_epoch_end'):
+                callback.on_epoch_end(epoch, {'loss': avg_train_loss})
+        
+        # Optional early stopping logic can be added here
+        
     # Save final model
     model.save_weights(config.FINAL_MODEL_PATH)
 
@@ -629,7 +661,7 @@ def train():
     if use_wandb:
         wandb.finish()
 
-    return model  # Return the trained model
+    return None  # Modify return as needed for your tracking requirements
 
 
 if __name__ == "__main__":

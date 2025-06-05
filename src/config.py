@@ -13,8 +13,8 @@ LONG_LINES = False
 LONG_LINES_FRACTION = 0.3
 
 # Model training parameters
-BATCH_SIZE = 1#64
-EPOCHS = 10#100
+BATCH_SIZE = 1
+EPOCHS = 100
 VOCAB_SIZE = 163
 DROPOUT = True
 OUTPUT_SHAPE = 143
@@ -33,12 +33,12 @@ LOAD = False
 LOAD_CHECKPOINT_PATH = "weights/saved_checkpoint.hdf5"
 
 # Learning parameters
-LEARNING_RATE = 0.000001
+LEARNING_RATE = 0.00001
 BATCH_NORM_EPSILON = 1e-5
 BATCH_NORM_DECAY = 0.997
 
 # Logging and checkpoint paths
-CHECKPOINT_PATH = 'weights/EASTER2--{epoch:02d}.keras'
+CHECKPOINT_PATH = 'weights/EASTER2--{epoch:02d}--{val_loss:.4f}--{val_cer:.4f}.keras'
 LOGS_DIR = 'logs'
 BEST_MODEL_PATH = "weights/best_model.keras"
 FINAL_MODEL_PATH = "weights/final_model.keras"
