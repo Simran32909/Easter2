@@ -684,6 +684,15 @@ def train():
 
     # Training loop with tqdm progress bars
     print("Starting custom training loop...")
+
+    history_log = {
+        'loss': [],
+        'val_loss': [],
+        'val_cer': [],
+        'val_accuracy': [],
+        'val_perfect_matches': []
+    }
+
     for epoch in tqdm(range(config.EPOCHS), desc="Epochs", position=0):
         print(f"\nEpoch {epoch+1}/{config.EPOCHS}")
         
@@ -752,6 +761,13 @@ def train():
                 # For simplicity, passing training loss. Actual val_loss would be better.
                 callback.on_epoch_end(epoch, logs_for_callbacks)
         
+        # Append metrics to history log
+        history_log['loss'].append(avg_train_loss)
+        history_log['val_loss'].append(logs_for_callbacks.get('val_loss', float('inf')))
+        history_log['val_cer'].append(logs_for_callbacks.get('val_cer', float('inf')))
+        history_log['val_accuracy'].append(logs_for_callbacks.get('val_accuracy', 0.0))
+        history_log['val_perfect_matches'].append(logs_for_callbacks.get('val_perfect_matches', 0))
+
         # Optional early stopping logic can be added here
         
     # Save final model
@@ -761,7 +777,7 @@ def train():
     if use_wandb:
         wandb.finish()
 
-    return None  # Modify return as needed for your tracking requirements
+    return history_log
 
 
 if __name__ == "__main__":
