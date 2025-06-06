@@ -2,8 +2,6 @@ import config
 import tensorflow
 import tensorflow as tf
 from tensorflow import keras
-from tensorflow.keras.callbacks import EarlyStopping
-from tensorflow.keras import mixed_precision
 from data_loader import data_loader
 import wandb
 from wandb.integration.keras import WandbCallback
@@ -260,8 +258,7 @@ def Easter2():
         filters=config.VOCAB_SIZE,
         kernel_size=(1),
         strides=(1),
-        padding="same",
-        dtype='float32' # Output layer in float32 for numerical stability.
+        padding="same"
     )(data)
 
     # Output logits (not softmax)
@@ -271,6 +268,16 @@ def Easter2():
     model = tensorflow.keras.models.Model(
         inputs=input_data, 
         outputs=y_pred
+    )
+
+    # Defining other training parameters
+    Optimizer = tensorflow.keras.optimizers.Adam(learning_rate=config.LEARNING_RATE)
+    
+    # Compile model with standard categorical crossentropy
+    model.compile(
+        optimizer=Optimizer, 
+        loss=None,  # Loss will be handled externally
+        jit_compile=False  # Explicitly disable JIT compilation
     )
     
     return model
@@ -370,11 +377,10 @@ class CERCallback(Callback):
 
     def set_model(self, model):
         """
-        Called by Keras to set the model. We call the parent's set_model and then
-        set our own prediction_model attribute.
+        Called by Keras to set the model.
         """
         super().set_model(model)
-        self.prediction_model = model
+        self.prediction_model = model # Use the main model for predictions
 
     def on_epoch_end(self, epoch, logs=None):
         """
@@ -476,11 +482,15 @@ class CERCallback(Callback):
                 # We need to be careful here: val_gtTexts_encoded are indices.
                 # We need to convert them back to text for CER.
                 
-                current_batch_samples = self.validation_data.samples[
-                    self.validation_data.currIdx - self.validation_data.batchSize : self.validation_data.currIdx
-                ]
-                
-                batch_ground_truths_text = [sample.gtText for sample in current_batch_samples[:len(decoded_preds)]]
+                batch_ground_truths_text = []
+                encoded_labels_np = val_gtTexts_encoded
+                label_lengths_np = val_label_length.numpy().flatten() # Ensure it's 1D
+
+                for i in range(encoded_labels_np.shape[0]):
+                    length = label_lengths_np[i]
+                    encoded_label = encoded_labels_np[i][:length]
+                    text = "".join([self.char_list[c] for c in encoded_label if c < len(self.char_list)])
+                    batch_ground_truths_text.append(text)
 
 
                 all_predictions.extend(decoded_preds)
@@ -533,6 +543,11 @@ class CERCallback(Callback):
         if 'loss' in logs:
              wandb_logs['loss'] = logs['loss'] # training loss from the main loop
         
+        if 'train_cer' in logs:
+            wandb_logs['train_cer'] = logs['train_cer']
+            wandb_logs['train_accuracy'] = logs.get('train_accuracy', 0.0)
+            wandb_logs['train_perfect_matches'] = logs.get('train_perfect_matches', 0)
+
         if wandb.run: # Check if wandb run is active
             wandb.log(wandb_logs)
 
@@ -547,15 +562,6 @@ def train():
     Main training function for the Easter2 model.
     Initializes WandB, loads data, sets up callbacks, and starts model training.
     """
-    # --- 1. SET UP MIXED PRECISION ---
-    # This will use float16 for computations and float32 for variable storage,
-    # leveraging Tensor Cores on the GPU for a significant speedup.
-    policy = mixed_precision.Policy('mixed_float16')
-    mixed_precision.set_global_policy(policy)
-    print(f'Compute dtype: {policy.compute_dtype}')
-    print(f'Variable dtype: {policy.variable_dtype}')
-
-
     # Check if WandB should be disabled
     if hasattr(config, 'DISABLE_WANDB') and config.DISABLE_WANDB:
         print("WandB logging disabled by command line argument")
@@ -585,19 +591,6 @@ def train():
 
     # Creating Easter2 model
     model = Easter2()
-
-    # --- 2. COMPILE MODEL WITH A STANDARD OPTIMIZER ---
-    # With set_global_policy, we don't need to manually wrap the optimizer.
-    # TensorFlow handles the loss scaling automatically.
-    optimizer = tensorflow.keras.optimizers.Adam(learning_rate=config.LEARNING_RATE, clipnorm=1.0)
-    
-    # Compile model with the new optimizer
-    model.compile(
-        optimizer=optimizer, 
-        loss=None,  # Loss will be handled externally
-        jit_compile=False
-    )
-
 
     # Loading checkpoint for transfer/resuming learning
     if config.LOAD:
@@ -638,14 +631,18 @@ def train():
     config.VOCAB_SIZE = len(training_data.charList) + 1  # +1 for blank token
 
     @tf.function
-    def train_step(inputs, labels, input_length, label_length):
+    def train_step(inputs, labels, label_length):
         with tf.GradientTape() as tape:
             logits = model(inputs, training=True)  # shape: (batch_size, time_steps, vocab_size)
-            # The model's final layer outputs float32, ensuring loss calculation is stable.
-            # Casting here is a safeguard.
             logits = tf.cast(logits, tf.float32)
 
-            input_length = tf.cast(input_length, tf.int32)
+            # Debugging check for logits
+            tf.debugging.check_numerics(logits, "Logits contain NaN or Inf")
+
+            # Dynamically determine logit_length from the model's output tensor
+            logit_length = tf.fill([tf.shape(logits)[0]], tf.shape(logits)[1])
+
+            input_length = tf.cast(logit_length, tf.int32)
             label_length = tf.cast(tf.reshape(label_length, [-1]), tf.int32)
 
             sparse_labels = tf.keras.backend.ctc_label_dense_to_sparse(labels, label_length)
@@ -660,13 +657,18 @@ def train():
                 )
 
             loss = tf.reduce_mean(loss)
-            
-        # With the global policy set, GradientTape automatically handles scaling.
-        # We calculate gradients on the unscaled loss.
-        gradients = tape.gradient(loss, model.trainable_variables)
-        optimizer.apply_gradients(zip(gradients, model.trainable_variables))
 
-        return loss
+            # Debugging check for loss
+            tf.debugging.check_numerics(loss, "Loss is NaN or Inf")
+
+        gradients = tape.gradient(loss, model.trainable_variables)
+        
+        # Apply gradient clipping to prevent exploding gradients
+        clipped_gradients = [tf.clip_by_value(grad, -1.0, 1.0) if grad is not None else None for grad in gradients]
+
+        model.optimizer.apply_gradients(zip(clipped_gradients, model.trainable_variables))
+
+        return loss, logits
     
 
     # Prepare callbacks and training parameters
@@ -687,17 +689,6 @@ def train():
         mode='min'
     )
 
-    # --- 4. ADD EARLY STOPPING CALLBACK ---
-    # This will monitor the validation CER and stop training if it doesn't
-    # improve for 10 epochs, automatically restoring the best model weights.
-    EARLY_STOPPING = EarlyStopping(
-        monitor='val_cer',
-        patience=25, # Number of epochs with no improvement after which training will be stopped.
-        verbose=1,
-        mode='min',
-        restore_best_weights=True # Restores model weights from the epoch with the best value.
-    )
-
     # Custom CER callback
     CER_CALLBACK = CERCallback(validation_data, training_data.charList)
 
@@ -706,7 +697,6 @@ def train():
         CER_CALLBACK, # Calculate val_loss and val_cer first
         CHECKPOINT,
         BEST_MODEL_CHECKPOINT,
-        EARLY_STOPPING
     ]
 
     # Add WandB callback if enabled
@@ -726,13 +716,11 @@ def train():
     # Training loop with tqdm progress bars
     print("Starting custom training loop...")
 
-    # Call on_train_begin for all callbacks to initialize them
-    for callback in callbacks_list:
-        if hasattr(callback, 'on_train_begin'):
-            callback.on_train_begin()
-
     history_log = {
         'loss': [],
+        'train_cer': [],
+        'train_accuracy': [],
+        'train_perfect_matches': [],
         'val_loss': [],
         'val_cer': [],
         'val_accuracy': [],
@@ -749,6 +737,8 @@ def train():
         # Training phase with batch progress bar
         total_train_loss = 0.0
         train_batches = 0
+        all_train_predictions = []
+        all_train_ground_truths = []
         
         steps_per_epoch = len(training_data.samples) // training_data.batchSize
         if steps_per_epoch == 0 and len(training_data.samples) > 0: # Handle cases where dataset is smaller than batch_size
@@ -768,13 +758,25 @@ def train():
             # Unpack inputs
             batch_inputs = inputs['the_input']
             batch_labels = inputs['the_labels']
-            batch_input_length = inputs['input_length']
             batch_label_length = inputs['label_length']
             
             # Perform training step
-            loss = train_step(batch_inputs, batch_labels, batch_input_length, batch_label_length)
+            loss, logits = train_step(batch_inputs, batch_labels, batch_label_length)
             total_train_loss += loss.numpy()
             train_batches += 1
+
+            # Decode for training CER calculation
+            decoded_preds = decoder(logits.numpy(), training_data.charList)
+            all_train_predictions.extend(decoded_preds)
+
+            encoded_labels_np = batch_labels
+            label_lengths_np = batch_label_length.flatten()
+            
+            for k in range(encoded_labels_np.shape[0]):
+                length = label_lengths_np[k]
+                encoded_label = encoded_labels_np[k][:length]
+                text = "".join([training_data.charList[c] for c in encoded_label if c < len(training_data.charList)])
+                all_train_ground_truths.append(text)
             
             # Update batch progress bar
             batch_iterator.set_postfix({'loss': f'{loss.numpy():.4f}'})
@@ -785,19 +787,22 @@ def train():
         
         # Average training loss
         avg_train_loss = total_train_loss / train_batches if train_batches > 0 else 0.0
-        print(f"Training Loss: {avg_train_loss:.4f}")
+        
+        # Calculate training CER for the epoch
+        train_cer, train_accuracy, train_perfect_matches = 0.0, 0.0, 0
+        if all_train_predictions and all_train_ground_truths:
+            train_cer, train_accuracy, train_perfect_matches = calculate_cer(all_train_predictions, all_train_ground_truths)
+
+        print(f"Training Loss: {avg_train_loss:.4f}, Training CER: {train_cer:.2f}%")
         
         # Run validation and callbacks
         # Construct logs dictionary for callbacks
-        logs_for_callbacks = {'loss': avg_train_loss}
-
-        # Simulate val_loss for callbacks if validation is performed elsewhere or not strictly needed for all callbacks
-        # For example, CERCallback calculates its own metrics.
-        # If other callbacks strictly need 'val_loss', it should be computed here.
-        # For now, we'll pass what we have.
-        # If validation_data is available and a validation step is performed, add 'val_loss' here.
-        # e.g. val_loss_value = calculate_validation_loss(model, validation_data)
-        # logs_for_callbacks['val_loss'] = val_loss_value
+        logs_for_callbacks = {
+            'loss': avg_train_loss,
+            'train_cer': train_cer,
+            'train_accuracy': train_accuracy,
+            'train_perfect_matches': train_perfect_matches
+        }
 
         for callback in callbacks_list:
             if hasattr(callback, 'on_epoch_end'):
@@ -809,21 +814,16 @@ def train():
         
         # Append metrics to history log
         history_log['loss'].append(avg_train_loss)
+        history_log['train_cer'].append(train_cer)
+        history_log['train_accuracy'].append(train_accuracy)
+        history_log['train_perfect_matches'].append(train_perfect_matches)
         history_log['val_loss'].append(logs_for_callbacks.get('val_loss', float('inf')))
         history_log['val_cer'].append(logs_for_callbacks.get('val_cer', float('inf')))
         history_log['val_accuracy'].append(logs_for_callbacks.get('val_accuracy', 0.0))
         history_log['val_perfect_matches'].append(logs_for_callbacks.get('val_perfect_matches', 0))
 
-        # --- 5. CHECK IF EARLY STOPPING WAS TRIGGERED ---
-        if model.stop_training:
-            print(f"Early stopping triggered at epoch {epoch + 1}.")
-            break
+        # Optional early stopping logic can be added here
         
-    # Call on_train_end for all callbacks for proper finalization
-    for callback in callbacks_list:
-        if hasattr(callback, 'on_train_end'):
-            callback.on_train_end()
-
     # Save final model
     model.save_weights(config.FINAL_MODEL_PATH)
 

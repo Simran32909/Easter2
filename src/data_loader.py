@@ -125,116 +125,57 @@ class data_loader:
         self.currIdx = 0
         self.samples = self.testSamples
 
-    def getIteratorInfo(self):
-        return (self.currIdx // self.batchSize + 1, len(self.samples) // self.batchSize)
-
-    def hasNext(self):
-        return self.currIdx + self.batchSize <= len(self.samples)
-
-    def preprocess(self, img, augment=True):
-        if img is None:
-            # Initialize with (Height, Width) as cv2.resize output this format
-            img = np.zeros((config.INPUT_HEIGHT, config.INPUT_WIDTH), dtype=np.uint8)
-
-        if augment and len(self.samples) > 3000:  # Only augment on training set
-            img = self.apply_taco_augmentations(img)
-
-        # Scaling image [0, 1]
-        img = img.astype(np.float32) / 255.0
-
-        # Resize to target dimensions if needed.
-        # cv2.resize takes (width, height) for dsize, and returns an array of shape (height, width).
-        # So, after this step, img.shape will be (config.INPUT_HEIGHT, config.INPUT_WIDTH).
-        if img.shape[0] != config.INPUT_HEIGHT or img.shape[1] != config.INPUT_WIDTH:
-            img = cv2.resize(img, (config.INPUT_WIDTH, config.INPUT_HEIGHT))
-        
-        # Transpose from (INPUT_HEIGHT, INPUT_WIDTH) to (INPUT_WIDTH, INPUT_HEIGHT)
-        # This matches the model's expected input_shape = (INPUT_WIDTH, INPUT_HEIGHT)
-        img = img.transpose((1, 0))
-
-        # Invert image (black text on white background -> white text on black background)
-        img = 1.0 - img
-
-        # Ensure no extra channel dimension is present
-        return img
-
-    def apply_taco_augmentations(self, input_img):
-        """Apply TACO augmentations"""
-        random_value = random.random()
-        if random_value <= config.TACO_AUGMENTAION_FRACTION:
-            augmented_img = self.mytaco.apply_vertical_taco(
-                input_img,
-                corruption_type='random'
-            )
-        else:
-            augmented_img = input_img
-        return augmented_img
-
     def getNext(self, what='train'):
         """Generator for training batches"""
-        while True:
-            if (self.currIdx + self.batchSize) <= len(self.samples):
+        num_batches = len(self.samples) // self.batchSize
+        for i in range(num_batches):
+            batch_samples = self.samples[i * self.batchSize:(i + 1) * self.batchSize]
 
-                batchRange = range(self.currIdx, self.currIdx + self.batchSize)
+            gtTexts = np.ones([self.batchSize, config.OUTPUT_SHAPE], dtype=np.int32) * len(self.charList)
+            # input_length should be the sequence length of the model's output (y_pred)
+            # For Easter2 model: Input width 2304 -> s=2 -> 1152 -> s=2 -> 576. Stays 576 after that.
+            actual_model_output_seq_len = config.INPUT_WIDTH // 4
+            input_length = np.full((self.batchSize,), actual_model_output_seq_len, dtype=np.int32)
+            label_length = np.zeros((self.batchSize, 1), dtype=np.int32)
+            # Initialize imgs with shape (batch_size, INPUT_WIDTH, INPUT_HEIGHT)
+            imgs = np.zeros([self.batchSize, config.INPUT_WIDTH, config.INPUT_HEIGHT], dtype=np.float32)
 
-                gtTexts = np.ones([self.batchSize, config.OUTPUT_SHAPE], dtype=np.int32) * len(self.charList)
-                # input_length should be the sequence length of the model's output (y_pred)
-                # For Easter2 model: Input width 2304 -> s=2 -> 1152 -> s=2 -> 576. Stays 576 after that.
-                actual_model_output_seq_len = config.INPUT_WIDTH // 4 
-                input_length = np.full((self.batchSize,), actual_model_output_seq_len, dtype=np.int32)
-                label_length = np.zeros((self.batchSize, 1), dtype=np.int32)
-                # Initialize imgs with shape (batch_size, INPUT_WIDTH, INPUT_HEIGHT)
-                imgs = np.zeros([self.batchSize, config.INPUT_WIDTH, config.INPUT_HEIGHT], dtype=np.float32)
+            for j, sample in enumerate(batch_samples):
+                try:
+                    img = cv2.imread(sample.filePath, cv2.IMREAD_GRAYSCALE)
+                    text = sample.gtText
 
+                    # Preprocess image
+                    augment = (what == 'train')
+                    img = self.preprocess(img, augment=augment)
+                    imgs[j] = img
 
-                j = 0
-                for i in batchRange:
-                    try:
-                        img = cv2.imread(self.samples[i].filePath, cv2.IMREAD_GRAYSCALE)
-                        text = self.samples[i].gtText
+                    # Encode text
+                    val = [self.charList.index(char) for char in text if char in self.charList]
 
-                        # Preprocess image
-                        augment = (what == 'train')
-                        img = self.preprocess(img, augment=augment)
-                        imgs[j] = img
+                    # Pad sequence
+                    if len(val) > config.OUTPUT_SHAPE:
+                        val = val[:config.OUTPUT_SHAPE]
 
-                        # Encode text
-                        val = []
-                        for char in text:
-                            if char in self.charList:
-                                val.append(self.charList.index(char))
-                            # Skip unknown characters
+                    gtTexts[j, :len(val)] = val
+                    label_length[j] = len(val)
 
-                        # Pad sequence
-                        if len(val) > config.OUTPUT_SHAPE:
-                            val = val[:config.OUTPUT_SHAPE]
+                except Exception as e:
+                    print(f"Error processing sample {sample.filePath}: {e}")
+                    # Create dummy data with shape (INPUT_WIDTH, INPUT_HEIGHT)
+                    imgs[j] = np.zeros((config.INPUT_WIDTH, config.INPUT_HEIGHT))
+                    gtTexts[j] = np.ones(config.OUTPUT_SHAPE) * len(self.charList)
+                    label_length[j] = 1
 
-                        gtTexts[j, :len(val)] = val
-                        label_length[j] = len(val)
-
-                        j += 1
-
-                    except Exception as e:
-                        print(f"Error processing sample {i}: {e}")
-                        # Create dummy data with shape (INPUT_WIDTH, INPUT_HEIGHT)
-                        imgs[j] = np.zeros((config.INPUT_WIDTH, config.INPUT_HEIGHT))
-                        gtTexts[j] = np.ones(config.OUTPUT_SHAPE) * len(self.charList)
-                        label_length[j] = 1
-                        j += 1
-
-                self.currIdx += self.batchSize
-
-                inputs = {
-                    'the_input': imgs,
-                    'the_labels': gtTexts,
-                    'input_length': input_length,
-                    'label_length': label_length,
-                }
-                # Simple array of zeros as dummy targets for the CTC loss
-                outputs = np.zeros([self.batchSize])
-                yield (inputs, outputs)
-            else:
-                self.currIdx = 0
+            inputs = {
+                'the_input': imgs,
+                'the_labels': gtTexts,
+                'input_length': input_length,
+                'label_length': label_length,
+            }
+            # Simple array of zeros as dummy targets for the CTC loss
+            outputs = np.zeros([self.batchSize])
+            yield (inputs, outputs)
 
     def getValidationImage(self):
         """Get all validation images for evaluation"""
@@ -285,3 +226,42 @@ class data_loader:
                 continue
 
         return imgs, texts, reals
+
+    def preprocess(self, img, augment=True):
+        if img is None:
+            # Initialize with (Height, Width) as cv2.resize output this format
+            img = np.zeros((config.INPUT_HEIGHT, config.INPUT_WIDTH), dtype=np.uint8)
+
+        if augment and len(self.samples) > 3000:  # Only augment on training set
+            img = self.apply_taco_augmentations(img)
+
+        # Scaling image [0, 1]
+        img = img.astype(np.float32) / 255.0
+
+        # Resize to target dimensions if needed.
+        # cv2.resize takes (width, height) for dsize, and returns an array of shape (height, width).
+        # So, after this step, img.shape will be (config.INPUT_HEIGHT, config.INPUT_WIDTH).
+        if img.shape[0] != config.INPUT_HEIGHT or img.shape[1] != config.INPUT_WIDTH:
+            img = cv2.resize(img, (config.INPUT_WIDTH, config.INPUT_HEIGHT))
+        
+        # Transpose from (INPUT_HEIGHT, INPUT_WIDTH) to (INPUT_WIDTH, INPUT_HEIGHT)
+        # This matches the model's expected input_shape = (INPUT_WIDTH, INPUT_HEIGHT)
+        img = img.transpose((1, 0))
+
+        # Invert image (black text on white background -> white text on black background)
+        img = 1.0 - img
+
+        # Ensure no extra channel dimension is present
+        return img
+
+    def apply_taco_augmentations(self, input_img):
+        """Apply TACO augmentations"""
+        random_value = random.random()
+        if random_value <= config.TACO_AUGMENTAION_FRACTION:
+            augmented_img = self.mytaco.apply_vertical_taco(
+                input_img,
+                corruption_type='random'
+            )
+        else:
+            augmented_img = input_img
+        return augmented_img

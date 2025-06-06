@@ -1,7 +1,7 @@
 # config.py
 
 # Input dataset related settings
-DATA_PATH = "/ssd_scratch/jyothi.swaroopa/Simran/data/synthetic/"
+DATA_PATH = "C:/Users/simra/PycharmProjects/Easter2/data/synthetic/"
 INPUT_HEIGHT = 32
 INPUT_WIDTH = 2304
 INPUT_SHAPE = (INPUT_WIDTH, INPUT_HEIGHT)
@@ -13,8 +13,8 @@ LONG_LINES = False
 LONG_LINES_FRACTION = 0.3
 
 # Model training parameters
-BATCH_SIZE = 640
-EPOCHS = 150
+BATCH_SIZE = 1
+EPOCHS = 10
 VOCAB_SIZE = 163
 DROPOUT = True
 OUTPUT_SHAPE = 143
@@ -33,7 +33,7 @@ LOAD = False
 LOAD_CHECKPOINT_PATH = "weights/saved_checkpoint.hdf5"
 
 # Learning parameters
-LEARNING_RATE = 0.000275
+LEARNING_RATE = 0.0001
 BATCH_NORM_EPSILON = 1e-5
 BATCH_NORM_DECAY = 0.997
 
