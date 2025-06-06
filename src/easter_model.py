@@ -2,6 +2,8 @@ import config
 import tensorflow
 import tensorflow as tf
 from tensorflow import keras
+from tensorflow.keras.callbacks import EarlyStopping
+from tensorflow.keras import mixed_precision
 from data_loader import data_loader
 import wandb
 from wandb.integration.keras import WandbCallback
@@ -258,7 +260,8 @@ def Easter2():
         filters=config.VOCAB_SIZE,
         kernel_size=(1),
         strides=(1),
-        padding="same"
+        padding="same",
+        dtype='float32' # Output layer in float32 for numerical stability.
     )(data)
 
     # Output logits (not softmax)
@@ -268,16 +271,6 @@ def Easter2():
     model = tensorflow.keras.models.Model(
         inputs=input_data, 
         outputs=y_pred
-    )
-
-    # Defining other training parameters
-    Optimizer = tensorflow.keras.optimizers.Adam(learning_rate=config.LEARNING_RATE, clipnorm=1.0)
-    
-    # Compile model with standard categorical crossentropy
-    model.compile(
-        optimizer=Optimizer, 
-        loss=None,  # Loss will be handled externally
-        jit_compile=False  # Explicitly disable JIT compilation
     )
     
     return model
@@ -554,6 +547,15 @@ def train():
     Main training function for the Easter2 model.
     Initializes WandB, loads data, sets up callbacks, and starts model training.
     """
+    # --- 1. SET UP MIXED PRECISION ---
+    # This will use float16 for computations and float32 for variable storage,
+    # leveraging Tensor Cores on the GPU for a significant speedup.
+    policy = mixed_precision.Policy('mixed_float16')
+    mixed_precision.set_global_policy(policy)
+    print(f'Compute dtype: {policy.compute_dtype}')
+    print(f'Variable dtype: {policy.variable_dtype}')
+
+
     # Check if WandB should be disabled
     if hasattr(config, 'DISABLE_WANDB') and config.DISABLE_WANDB:
         print("WandB logging disabled by command line argument")
@@ -583,6 +585,19 @@ def train():
 
     # Creating Easter2 model
     model = Easter2()
+
+    # --- 2. COMPILE MODEL WITH A STANDARD OPTIMIZER ---
+    # With set_global_policy, we don't need to manually wrap the optimizer.
+    # TensorFlow handles the loss scaling automatically.
+    optimizer = tensorflow.keras.optimizers.Adam(learning_rate=config.LEARNING_RATE, clipnorm=1.0)
+    
+    # Compile model with the new optimizer
+    model.compile(
+        optimizer=optimizer, 
+        loss=None,  # Loss will be handled externally
+        jit_compile=False
+    )
+
 
     # Loading checkpoint for transfer/resuming learning
     if config.LOAD:
@@ -626,10 +641,12 @@ def train():
     def train_step(inputs, labels, input_length, label_length):
         with tf.GradientTape() as tape:
             logits = model(inputs, training=True)  # shape: (batch_size, time_steps, vocab_size)
+            # The model's final layer outputs float32, ensuring loss calculation is stable.
+            # Casting here is a safeguard.
+            logits = tf.cast(logits, tf.float32)
 
             input_length = tf.cast(input_length, tf.int32)
             label_length = tf.cast(tf.reshape(label_length, [-1]), tf.int32)
-            logits = tf.cast(logits, tf.float32)
 
             sparse_labels = tf.keras.backend.ctc_label_dense_to_sparse(labels, label_length)
 
@@ -643,9 +660,11 @@ def train():
                 )
 
             loss = tf.reduce_mean(loss)
-
+            
+        # With the global policy set, GradientTape automatically handles scaling.
+        # We calculate gradients on the unscaled loss.
         gradients = tape.gradient(loss, model.trainable_variables)
-        model.optimizer.apply_gradients(zip(gradients, model.trainable_variables))
+        optimizer.apply_gradients(zip(gradients, model.trainable_variables))
 
         return loss
     
@@ -668,6 +687,17 @@ def train():
         mode='min'
     )
 
+    # --- 4. ADD EARLY STOPPING CALLBACK ---
+    # This will monitor the validation CER and stop training if it doesn't
+    # improve for 10 epochs, automatically restoring the best model weights.
+    EARLY_STOPPING = EarlyStopping(
+        monitor='val_cer',
+        patience=25, # Number of epochs with no improvement after which training will be stopped.
+        verbose=1,
+        mode='min',
+        restore_best_weights=True # Restores model weights from the epoch with the best value.
+    )
+
     # Custom CER callback
     CER_CALLBACK = CERCallback(validation_data, training_data.charList)
 
@@ -676,6 +706,7 @@ def train():
         CER_CALLBACK, # Calculate val_loss and val_cer first
         CHECKPOINT,
         BEST_MODEL_CHECKPOINT,
+        EARLY_STOPPING
     ]
 
     # Add WandB callback if enabled
@@ -694,6 +725,11 @@ def train():
 
     # Training loop with tqdm progress bars
     print("Starting custom training loop...")
+
+    # Call on_train_begin for all callbacks to initialize them
+    for callback in callbacks_list:
+        if hasattr(callback, 'on_train_begin'):
+            callback.on_train_begin()
 
     history_log = {
         'loss': [],
@@ -778,8 +814,16 @@ def train():
         history_log['val_accuracy'].append(logs_for_callbacks.get('val_accuracy', 0.0))
         history_log['val_perfect_matches'].append(logs_for_callbacks.get('val_perfect_matches', 0))
 
-        # Optional early stopping logic can be added here
+        # --- 5. CHECK IF EARLY STOPPING WAS TRIGGERED ---
+        if model.stop_training:
+            print(f"Early stopping triggered at epoch {epoch + 1}.")
+            break
         
+    # Call on_train_end for all callbacks for proper finalization
+    for callback in callbacks_list:
+        if hasattr(callback, 'on_train_end'):
+            callback.on_train_end()
+
     # Save final model
     model.save_weights(config.FINAL_MODEL_PATH)
 
