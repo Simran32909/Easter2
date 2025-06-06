@@ -377,10 +377,11 @@ class CERCallback(Callback):
 
     def set_model(self, model):
         """
-        Called by Keras to set the model.
+        Called by Keras to set the model. We call the parent's set_model and then
+        set our own prediction_model attribute.
         """
-        self.model = model # Keras sets this automatically, but good to be explicit for clarity
-        self.prediction_model = model # Use the main model for predictions
+        super().set_model(model)
+        self.prediction_model = model
 
     def on_epoch_end(self, epoch, logs=None):
         """
