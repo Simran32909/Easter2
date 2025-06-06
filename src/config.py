@@ -13,7 +13,7 @@ LONG_LINES = False
 LONG_LINES_FRACTION = 0.3
 
 # Model training parameters
-BATCH_SIZE = 512
+BATCH_SIZE = 640
 EPOCHS = 150
 VOCAB_SIZE = 163
 DROPOUT = True
@@ -33,7 +33,7 @@ LOAD = False
 LOAD_CHECKPOINT_PATH = "weights/saved_checkpoint.hdf5"
 
 # Learning parameters
-LEARNING_RATE = 0.00022
+LEARNING_RATE = 0.000275
 BATCH_NORM_EPSILON = 1e-5
 BATCH_NORM_DECAY = 0.997
 
