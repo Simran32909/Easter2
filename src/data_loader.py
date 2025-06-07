@@ -66,17 +66,20 @@ class data_loader:
                     data = json.load(f)
 
                 sample_id = data['id']
-                original_text = data['original_text']
+                original_text = data.get('original_text', '')
 
                 # Construct image path
                 img_path = os.path.join(os.path.dirname(json_file), f"{sample_id}.png")
 
-                # Check if image exists
-                if os.path.exists(img_path):
+                # Check if image exists and text is not empty
+                if os.path.exists(img_path) and original_text:
                     chars = chars.union(set(list(original_text)))
                     self.samples.append(Sample(original_text, img_path, sample_id))
                 else:
-                    print(f"Warning: Image not found for {sample_id}")
+                    if not os.path.exists(img_path):
+                        print(f"Warning: Image not found for {sample_id}")
+                    if not original_text:
+                        print(f"Warning: Empty 'original_text' for {sample_id}. Skipping sample.")
 
             except Exception as e:
                 print(f"Error loading {json_file}: {e}")
@@ -165,6 +168,7 @@ class data_loader:
                     # Create dummy data with shape (INPUT_WIDTH, INPUT_HEIGHT)
                     imgs[j] = np.zeros((config.INPUT_WIDTH, config.INPUT_HEIGHT))
                     gtTexts[j] = np.ones(config.OUTPUT_SHAPE) * len(self.charList)
+                    gtTexts[j, 0] = 0  # Dummy label with a valid character index
                     label_length[j] = 1
 
             inputs = {

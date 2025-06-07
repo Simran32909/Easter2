@@ -4,3 +4,9 @@ matplotlib
 editdistance
 taco-box
 tqdm
+pandas
+numpy
+scikit-learn
+wandb
+psutil
+gputil
